@@ -337,7 +337,7 @@ bybit-futures-bot/
 ### 로컬 실행
 
 ```bash
-git clone https://github.com/<your-username>/bybit-futures-bot.git
+git clone https://github.com/lirongzzuin/bybit-futures-bot.git
 cd bybit-futures-bot
 
 python3.11 -m venv venv
