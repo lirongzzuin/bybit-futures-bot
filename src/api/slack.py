@@ -116,6 +116,27 @@ class SlackNotifier:
     def send_order_failed(self, symbol: str, side: str, error: str) -> None:
         self._send(f"💥 *Order Failed* `{symbol}` {side} | `{error[:200]}`")
 
+    def send_position_opened(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        qty: float,
+        leverage: int,
+        stop_price: float,
+        take_profit_price: float,
+        signal_strength: float,
+        order_type: str = "Limit",
+    ) -> None:
+        arrow = "📈" if side == "Buy" else "📉"
+        direction = "LONG" if side == "Buy" else "SHORT"
+        self._send(
+            f"{arrow} *Opened* `{symbol}` {direction} ×{leverage} | {order_type}\n"
+            f"진입가={entry_price:,.4f} | qty={qty} | "
+            f"SL={stop_price:,.4f} | TP={take_profit_price:,.4f}\n"
+            f"signal={signal_strength:.2f} | {_now()}"
+        )
+
     def send_position_closed(
         self,
         symbol: str,

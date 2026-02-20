@@ -342,6 +342,19 @@ class TradingBot:
             # Store trade_id in state for later close update
             self._db.set_state(f"trade_id:{symbol}", trade_id)
 
+            # Slack: 포지션 진입 알림
+            self._slack.send_position_opened(
+                symbol=symbol,
+                side="Buy" if direction == 1 else "Sell",
+                entry_price=entry_price,
+                qty=float(order.qty),
+                leverage=risk_params.leverage,
+                stop_price=risk_params.stop_price,
+                take_profit_price=risk_params.take_profit_price,
+                signal_strength=signal_strength,
+                order_type=order.order_type,
+            )
+
     def _execute_partial_exit(self, symbol, pos, current_price, exit_signal, snap) -> None:
         """Close partial_exit_pct of the position at TP1; move stop to breakeven."""
         qty_to_close = pos.qty * pos.partial_exit_pct
