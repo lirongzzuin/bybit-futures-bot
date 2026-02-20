@@ -182,6 +182,8 @@ class StateMachine:
         regime_flip: bool = False, # True if regime changed adversely
         bars_in_trade: int = 0,
         max_bars: int = 200,
+        signal_strength: float = 1.0,  # current combined signal strength
+        exit_threshold: float = 0.0,   # SIGNAL_EXIT_THRESHOLD from settings
     ) -> ExitSignal:
         pos = self.get_position(symbol)
 
@@ -266,7 +268,7 @@ class StateMachine:
                 message="Regime changed adversely",
             )
 
-        # Strong counter-signal → partial exit (50%)
+        # Strong counter-signal → exit
         if pos.is_long and signal_direction == -1:
             return ExitSignal(
                 should_exit=True,
@@ -279,6 +281,16 @@ class StateMachine:
                 reason=ExitReason.SIGNAL_FLIP,
                 message="Strong counter-signal against short",
             )
+
+        # ── 4b. Signal weakness exit (SIGNAL_EXIT_THRESHOLD) ─────────────────
+        # If same direction but signal strength fell below exit threshold, exit
+        if exit_threshold > 0 and signal_strength < exit_threshold:
+            if (pos.is_long and signal_direction != -1) or (pos.is_short and signal_direction != 1):
+                return ExitSignal(
+                    should_exit=True,
+                    reason=ExitReason.SIGNAL_FLIP,
+                    message=f"Signal strength {signal_strength:.2f} fell below exit threshold {exit_threshold:.2f}",
+                )
 
         # ── 5. Time exit ──────────────────────────────────────────────────────
         effective_max_bars = pos.mode_max_bars if max_bars == 200 else max_bars
@@ -360,6 +372,27 @@ class StateMachine:
         pos.order_id = None
 
         return pnl
+
+    # ── Force Flat (Liquidation Recovery) ────────────────────────────────────
+
+    def force_flat(self, symbol: str) -> None:
+        """Force position to FLAT state — used when liquidation detected on exchange."""
+        pos = self.get_position(symbol)
+        if pos.is_flat:
+            return
+        log.warning("force_flat: %s state=%s — resetting to FLAT", symbol, pos.state.value)
+        pos.last_exit_ts = time.time()
+        pos.state = PositionState.FLAT
+        pos.entry_price = 0.0
+        pos.qty = 0.0
+        pos.leverage = 1
+        pos.stop_price = 0.0
+        pos.take_profit_price = 0.0
+        pos.tp1_price = 0.0
+        pos.tp2_price = 0.0
+        pos.tp1_hit = False
+        pos.trailing_stop_distance = 0.0
+        pos.order_id = None
 
     # ── Sync with exchange ────────────────────────────────────────────────────
 

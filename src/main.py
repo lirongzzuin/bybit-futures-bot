@@ -116,7 +116,7 @@ class TradingBot:
         weekly_pnl = self._db.get_weekly_pnl()
         peak_equity = self._db.get_peak_equity(settings.TRADING_MODE) or equity
 
-        # ── 3. Sync positions from exchange on first pass ─────────────────────
+        # ── 3. Sync positions from exchange every cycle to detect liquidations ──
         if not settings.is_dry_run():
             self._sync_positions(symbols)
 
@@ -225,6 +225,8 @@ class TradingBot:
                 signal_direction=combined.direction,
                 regime_flip=regime_flip,
                 bars_in_trade=bars_in_trade,
+                signal_strength=combined.strength,
+                exit_threshold=settings.SIGNAL_EXIT_THRESHOLD,
             )
 
             if exit_check.should_exit:
@@ -293,19 +295,19 @@ class TradingBot:
         )
 
         # Execute entry
-        self._execute_entry(symbol, combined.direction, risk_params, snap, sym_info)
+        self._execute_entry(symbol, combined.direction, risk_params, snap, sym_info, combined.strength)
 
     # ── Order Execution ───────────────────────────────────────────────────────
 
     def _execute_entry(
-        self, symbol, direction, risk_params, snap, sym_info
+        self, symbol, direction, risk_params, snap, sym_info, signal_strength: float = 0.7
     ) -> None:
         order = self._order_mgr.open_position(
             symbol=symbol,
             direction=direction,
             risk_params=risk_params,
             spread_pct=snap.orderbook.spread_pct,
-            signal_strength=0.7,   # placeholder
+            signal_strength=signal_strength,
             current_price=snap.last_price,
             symbol_info=sym_info,
         )
@@ -330,7 +332,7 @@ class TradingBot:
                 take_profit_price=risk_params.take_profit_price,
                 trailing_distance=risk_params.trailing_stop_atr,
                 order_id=order.client_id,
-                reason=f"signal_strength={0.7:.2f}",
+                reason=f"signal_strength={signal_strength:.2f}",
                 tp1_price=risk_params.tp1_price,
                 tp2_price=risk_params.tp2_price,
                 trade_mode=risk_params.trade_mode,
@@ -526,12 +528,41 @@ class TradingBot:
     # ── Position Sync ─────────────────────────────────────────────────────────
 
     def _sync_positions(self, symbols: List[str]) -> None:
-        """On restart, sync local state with exchange reality."""
+        """Sync local state with exchange every cycle to detect liquidations."""
         try:
             exchange_positions = self._client.get_positions()
+            exchange_by_symbol = {p.get("symbol"): p for p in exchange_positions if float(p.get("size", 0)) > 0}
+
             for symbol in symbols:
+                local_pos = self._state_machine.get_position(symbol)
                 sym_pos = [p for p in exchange_positions if p.get("symbol") == symbol]
                 self._state_machine.sync_from_exchange(symbol, sym_pos)
+
+                # Detect liquidation: local state says open, but exchange says flat
+                if not local_pos.is_flat and symbol not in exchange_by_symbol:
+                    log.error(
+                        "LIQUIDATION DETECTED for %s — local=%s but exchange has no position",
+                        symbol, local_pos.state.value,
+                    )
+                    # Record as liquidated trade
+                    trade_id = self._db.get_state(f"trade_id:{symbol}")
+                    if trade_id:
+                        liq_price = local_pos.stop_price or local_pos.entry_price
+                        pnl = (liq_price - local_pos.entry_price) * local_pos.qty
+                        if local_pos.is_short:
+                            pnl = (local_pos.entry_price - liq_price) * local_pos.qty
+                        self._db.update_trade_close(
+                            trade_id=trade_id,
+                            exit_price=liq_price,
+                            pnl=pnl,
+                            fee=local_pos.qty * liq_price * settings.BACKTEST_FEE_TAKER,
+                            reason="LIQUIDATION",
+                        )
+                    # Force local state to FLAT
+                    self._state_machine.force_flat(symbol)
+                    self._slack.send_risk_alert(
+                        f"🚨 LIQUIDATION: `{symbol}` position was liquidated by exchange!"
+                    )
         except Exception as e:
             log.warning("Position sync failed: %s", e)
 
@@ -623,7 +654,11 @@ def main():
     # Graceful shutdown
     def _shutdown(signum, frame):
         log.info("Shutdown signal received")
-        scheduler.shutdown(wait=False)
+        try:
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+        except Exception:
+            pass
         slack.send_shutdown("signal")
         sys.exit(0)
 

@@ -2,10 +2,12 @@
 Signal Combiner — applies regime-based weights to the signal bundle
 and produces a final CombinedSignal with direction and strength.
 
-Category weights per regime (vwap=0.10, orderbook=0.05 added; others renormalized):
-  TRENDING_UP/DOWN : trend(0.35) + ict(0.30) + vwap(0.10) + volume(0.12) + volatility(0.08) + reversion(0.05)
-  RANGING          : reversion(0.30) + ict(0.25) + vwap(0.10) + volume(0.18) + orderbook(0.05) + trend(0.07) + volatility(0.05)
-  HIGH_VOLATILITY  : all weights reduced; reversion suppressed; volatility elevated
+Category weights per regime:
+  TRENDING_UP/DOWN : trend(0.27) + ict(0.30) + vwap(0.08) + volume(0.12) + volatility(0.06)
+                   + reversion(0.03) + squeeze(0.08) + orderbook(0.00) + momentum(0.06)
+  RANGING          : reversion(0.25) + ict(0.22) + vwap(0.10) + volume(0.18) + orderbook(0.04)
+                   + trend(0.05) + volatility(0.04) + squeeze(0.06) + momentum(0.06)
+  HIGH_VOLATILITY  : all weights reduced; reversion suppressed; volatility elevated; squeeze emphasized
 """
 from __future__ import annotations
 
@@ -39,20 +41,28 @@ class CombinedSignal:
 
 _REGIME_WEIGHTS: Dict[str, Dict[str, float]] = {
     Regime.TRENDING_UP: {
-        "trend": 0.30, "ict": 0.38, "vwap": 0.10, "volume": 0.12,
-        "volatility": 0.07, "reversion": 0.03, "orderbook": 0.00,
+        # Trending: heavy ICT + trend + squeeze momentum; reduce reversion noise
+        "trend": 0.27, "ict": 0.30, "vwap": 0.08, "volume": 0.12,
+        "volatility": 0.06, "reversion": 0.03, "orderbook": 0.00,
+        "squeeze": 0.08, "momentum": 0.06,
     },
     Regime.TRENDING_DOWN: {
-        "trend": 0.30, "ict": 0.38, "vwap": 0.10, "volume": 0.12,
-        "volatility": 0.07, "reversion": 0.03, "orderbook": 0.00,
+        # Same as TRENDING_UP — ICT leads, trend confirms
+        "trend": 0.27, "ict": 0.30, "vwap": 0.08, "volume": 0.12,
+        "volatility": 0.06, "reversion": 0.03, "orderbook": 0.00,
+        "squeeze": 0.08, "momentum": 0.06,
     },
     Regime.RANGING: {
-        "trend": 0.06, "ict": 0.30, "vwap": 0.12, "volume": 0.25,
-        "volatility": 0.04, "reversion": 0.20, "orderbook": 0.03,
+        # Ranging: reversion + volume-profile + squeeze signals dominate
+        "trend": 0.05, "ict": 0.22, "vwap": 0.10, "volume": 0.18,
+        "volatility": 0.04, "reversion": 0.25, "orderbook": 0.04,
+        "squeeze": 0.06, "momentum": 0.06,
     },
     Regime.HIGH_VOLATILITY: {
-        "trend": 0.18, "ict": 0.27, "vwap": 0.10, "volume": 0.22,
-        "volatility": 0.13, "reversion": 0.05, "orderbook": 0.05,
+        # High vol: prefer squeeze breakouts and ICT; suppress reversion
+        "trend": 0.16, "ict": 0.25, "vwap": 0.09, "volume": 0.18,
+        "volatility": 0.12, "reversion": 0.04, "orderbook": 0.04,
+        "squeeze": 0.08, "momentum": 0.04,
     },
 }
 
@@ -74,7 +84,8 @@ class SignalCombiner:
         category_short: Dict[str, float] = {}
         category_scores: Dict[str, float] = {}
 
-        for cat in ("trend", "reversion", "volatility", "volume", "ict", "vwap", "orderbook"):
+        for cat in ("trend", "reversion", "volatility", "volume", "ict", "vwap", "orderbook",
+                    "momentum", "squeeze"):
             cat_signals = bundle.by_category(cat)
             if not cat_signals:
                 category_long[cat] = 0.0

@@ -186,10 +186,10 @@ class OrderManager:
         )
 
         if use_market:
-            success = self._place_market(managed, current_price, symbol_info)
+            success = self._place_market(managed, current_price, symbol_info, is_close=True)
         else:
             success = self._place_limit_with_retry(
-                managed, current_price, symbol_info, -direction  # opposite to get filled
+                managed, current_price, symbol_info, -direction, is_close=True  # opposite to get filled
             )
 
         if success:
@@ -203,7 +203,8 @@ class OrderManager:
     # ── Internal placers ──────────────────────────────────────────────────────
 
     def _place_market(
-        self, managed: ManagedOrder, current_price: float, symbol_info: dict
+        self, managed: ManagedOrder, current_price: float, symbol_info: dict,
+        is_close: bool = False,
     ) -> bool:
         if self._s.is_dry_run():
             managed.status = OrderStatus.FILLED
@@ -244,6 +245,17 @@ class OrderManager:
                 managed.avg_price = current_price
                 managed.price = str(current_price)
                 return True
+            if e.code == 110017 and is_close:
+                # "current position is zero" — position already closed/liquidated on exchange.
+                # Treat as success so the state machine can move to FLAT.
+                log.warning(
+                    "110017: position already zero for %s — treating close as success",
+                    managed.symbol,
+                )
+                managed.status = OrderStatus.FILLED
+                managed.avg_price = current_price
+                managed.price = str(current_price)
+                return True
             log.error("Market order failed: %s", e)
             managed.status = OrderStatus.FAILED
             return False
@@ -263,6 +275,7 @@ class OrderManager:
         current_price: float,
         symbol_info: dict,
         direction: int,
+        is_close: bool = False,
     ) -> bool:
         timeout = self._s.LIMIT_ORDER_TIMEOUT_SECONDS
         max_retries = self._s.LIMIT_ORDER_MAX_RETRIES
@@ -323,14 +336,24 @@ class OrderManager:
                         )
                         if attempt == max_retries:
                             log.info("Falling back to market order for %s", managed.symbol)
-                            return self._place_market(managed, current_price, symbol_info)
+                            return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                         continue
+                elif e.code == 110017 and is_close:
+                    # "current position is zero" — position already closed/liquidated.
+                    log.warning(
+                        "110017: position already zero for %s — treating close as success",
+                        managed.symbol,
+                    )
+                    managed.status = OrderStatus.FILLED
+                    managed.avg_price = current_price
+                    managed.price = str(current_price)
+                    return True
                 else:
                     log.warning("Limit order attempt %d failed: %s", attempt, e)
                     if attempt == max_retries:
                         # Fallback to market
                         log.info("Falling back to market order for %s", managed.symbol)
-                        return self._place_market(managed, current_price, symbol_info)
+                        return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                     continue
 
             # Wait for fill or timeout
@@ -350,7 +373,7 @@ class OrderManager:
                     pass
 
             if attempt == max_retries:
-                return self._place_market(managed, current_price, symbol_info)
+                return self._place_market(managed, current_price, symbol_info, is_close=is_close)
 
         return False
 

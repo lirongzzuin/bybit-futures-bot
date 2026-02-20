@@ -72,6 +72,9 @@ class Database:
     def _conn(self):
         conn = sqlite3.connect(self._path, timeout=10)
         conn.row_factory = sqlite3.Row
+        # WAL mode: allows concurrent reads + writes, prevents blocking during backtest
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             yield conn
             conn.commit()

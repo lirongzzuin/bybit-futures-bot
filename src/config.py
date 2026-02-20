@@ -85,6 +85,18 @@ class Settings(BaseSettings):
     # Hull Moving Average (Alan Hull, 2005)
     HULL_MA_PERIOD: int = 16
 
+    # ── Advanced Indicators ───────────────────────────────────
+    STOCHRSI_RSI_PERIOD: int = 14          # RSI period for StochRSI
+    STOCHRSI_STOCH_PERIOD: int = 14        # Stochastic period
+    STOCHRSI_SMOOTH_K: int = 3             # K line smoothing
+    STOCHRSI_SMOOTH_D: int = 3             # D signal line smoothing
+    WILLIAMS_R_PERIOD: int = 14            # Williams %R period
+    CMF_PERIOD: int = 20                   # Chaikin Money Flow period
+    OBV_EMA_PERIOD: int = 20               # OBV trend EMA
+    SQUEEZE_BB_PERIOD: int = 20            # Squeeze momentum BB period
+    SQUEEZE_KC_PERIOD: int = 20            # Squeeze momentum KC period
+    RSI_DIVERGENCE_LOOKBACK: int = 14      # RSI divergence lookback window
+
     # ── ICT Settings ─────────────────────────────────────────
     ICT_SWING_PERIOD: int = 5              # bars each side for swing pivot
     ICT_FVG_LOOKBACK: int = 50

@@ -27,14 +27,20 @@ from src.config import Settings
 from src.strategy.indicators import (
     atr,
     bollinger_bands,
+    cmf,
     ema,
     hull_ma,
     keltner_channel,
     macd,
+    obv,
     rsi,
+    rsi_divergence,
+    squeeze_momentum,
+    stoch_rsi,
     volume_zscore,
     volatility_percentile,
     volume_ratio,
+    williams_r,
     vwap as compute_vwap,
 )
 from src.strategy.ict import ICTResult, StructureBias
@@ -130,6 +136,24 @@ class SignalGenerator:
 
         # ── Category 9: Hull MA Direction ─────────────────────────────────────
         bundle.signals += self._hma_signal(close)
+
+        # ── Category 10: Stochastic RSI ───────────────────────────────────────
+        bundle.signals += self._stochrsi_signal(close)
+
+        # ── Category 11: Williams %R ──────────────────────────────────────────
+        bundle.signals += self._williams_r_signal(close, high, low)
+
+        # ── Category 12: Chaikin Money Flow ──────────────────────────────────
+        bundle.signals += self._cmf_signal(close, high, low, volume)
+
+        # ── Category 13: RSI Divergence ───────────────────────────────────────
+        bundle.signals += self._rsi_divergence_signal(close)
+
+        # ── Category 14: OBV Trend ────────────────────────────────────────────
+        bundle.signals += self._obv_signal(close, volume)
+
+        # ── Category 15: Squeeze Momentum ─────────────────────────────────────
+        bundle.signals += self._squeeze_signal(close, high, low)
 
         return bundle
 
@@ -531,6 +555,354 @@ class SignalGenerator:
                 confidence=min(1.0, max(0.0, conf)),
                 category="trend",
             ))
+        except Exception:
+            pass
+        return signals
+
+    # ── Stochastic RSI Signal ─────────────────────────────────────────────────
+
+    def _stochrsi_signal(self, close: pd.Series) -> List[Signal]:
+        """
+        Stochastic RSI: Enter on oversold/overbought extremes with K/D crossover.
+        K crosses D from below in oversold zone (K<20) → bullish.
+        K crosses D from above in overbought zone (K>80) → bearish.
+        """
+        signals = []
+        try:
+            srsi = stoch_rsi(
+                close,
+                rsi_period=self._s.STOCHRSI_RSI_PERIOD,
+                stoch_period=self._s.STOCHRSI_STOCH_PERIOD,
+                smooth_k=self._s.STOCHRSI_SMOOTH_K,
+                smooth_d=self._s.STOCHRSI_SMOOTH_D,
+            )
+            if len(srsi.dropna()) < 3:
+                return signals
+
+            k_now = float(srsi["k"].iloc[-1])
+            k_prev = float(srsi["k"].iloc[-2])
+            d_now = float(srsi["d"].iloc[-1])
+            d_prev = float(srsi["d"].iloc[-2])
+
+            if pd.isna(k_now) or pd.isna(d_now):
+                return signals
+
+            # Bullish: K crosses above D in oversold zone (< 30)
+            if k_prev <= d_prev and k_now > d_now and k_now < 50:
+                conf = min(1.0, (50 - k_now) / 50 + 0.3)
+                signals.append(Signal(
+                    name="stochrsi_bullish",
+                    direction=1,
+                    confidence=conf,
+                    category="reversion",
+                ))
+            # Bearish: K crosses below D in overbought zone (> 70)
+            elif k_prev >= d_prev and k_now < d_now and k_now > 50:
+                conf = min(1.0, (k_now - 50) / 50 + 0.3)
+                signals.append(Signal(
+                    name="stochrsi_bearish",
+                    direction=-1,
+                    confidence=conf,
+                    category="reversion",
+                ))
+            # Strong momentum continuation: K and D both > 70 (trending up)
+            elif k_now > 70 and d_now > 70:
+                signals.append(Signal(
+                    name="stochrsi_momentum_up",
+                    direction=1,
+                    confidence=min(1.0, (k_now - 70) / 30),
+                    category="momentum",
+                ))
+            # Strong momentum continuation: K and D both < 30 (trending down)
+            elif k_now < 30 and d_now < 30:
+                signals.append(Signal(
+                    name="stochrsi_momentum_down",
+                    direction=-1,
+                    confidence=min(1.0, (30 - k_now) / 30),
+                    category="momentum",
+                ))
+            else:
+                signals.append(Signal(
+                    name="stochrsi_neutral",
+                    direction=0,
+                    confidence=0.1,
+                    category="reversion",
+                ))
+        except Exception:
+            pass
+        return signals
+
+    # ── Williams %R Signal ────────────────────────────────────────────────────
+
+    def _williams_r_signal(
+        self, close: pd.Series, high: pd.Series, low: pd.Series
+    ) -> List[Signal]:
+        """
+        Williams %R: Detect overbought/oversold conditions.
+        Below -80 = oversold → bullish reversal signal.
+        Above -20 = overbought → bearish reversal signal.
+        """
+        signals = []
+        try:
+            wr = williams_r(high, low, close, self._s.WILLIAMS_R_PERIOD)
+            if wr.empty or pd.isna(wr.iloc[-1]):
+                return signals
+
+            wr_now = float(wr.iloc[-1])
+            wr_prev = float(wr.iloc[-2]) if len(wr) >= 2 else wr_now
+
+            if wr_now < -80:
+                # Deeply oversold — bullish
+                conf = min(1.0, (-80 - wr_now) / 20 + 0.4)
+                signals.append(Signal(
+                    name="williams_r_oversold",
+                    direction=1,
+                    confidence=conf,
+                    category="reversion",
+                ))
+            elif wr_now > -20:
+                # Deeply overbought — bearish
+                conf = min(1.0, (wr_now + 20) / 20 + 0.4)
+                signals.append(Signal(
+                    name="williams_r_overbought",
+                    direction=-1,
+                    confidence=conf,
+                    category="reversion",
+                ))
+            elif wr_prev < -80 and wr_now >= -80:
+                # Exiting oversold — bullish momentum
+                signals.append(Signal(
+                    name="williams_r_exit_oversold",
+                    direction=1,
+                    confidence=0.65,
+                    category="trend",
+                ))
+            elif wr_prev > -20 and wr_now <= -20:
+                # Exiting overbought — bearish momentum
+                signals.append(Signal(
+                    name="williams_r_exit_overbought",
+                    direction=-1,
+                    confidence=0.65,
+                    category="trend",
+                ))
+        except Exception:
+            pass
+        return signals
+
+    # ── Chaikin Money Flow Signal ─────────────────────────────────────────────
+
+    def _cmf_signal(
+        self, close: pd.Series, high: pd.Series, low: pd.Series, volume: pd.Series
+    ) -> List[Signal]:
+        """
+        CMF: Positive = buying pressure, Negative = selling pressure.
+        CMF > 0.1 and rising → bullish confirmation.
+        CMF < -0.1 and falling → bearish confirmation.
+        """
+        signals = []
+        try:
+            cmf_series = cmf(high, low, close, volume, self._s.CMF_PERIOD)
+            if cmf_series.empty or pd.isna(cmf_series.iloc[-1]):
+                return signals
+
+            cmf_now = float(cmf_series.iloc[-1])
+            cmf_prev = float(cmf_series.iloc[-2]) if len(cmf_series) >= 2 else cmf_now
+
+            if cmf_now > 0.1:
+                # Buying pressure
+                rising = cmf_now > cmf_prev
+                conf = min(1.0, cmf_now * 5 + (0.15 if rising else 0))
+                signals.append(Signal(
+                    name="cmf_bullish",
+                    direction=1,
+                    confidence=conf,
+                    category="volume",
+                ))
+            elif cmf_now < -0.1:
+                # Selling pressure
+                falling = cmf_now < cmf_prev
+                conf = min(1.0, abs(cmf_now) * 5 + (0.15 if falling else 0))
+                signals.append(Signal(
+                    name="cmf_bearish",
+                    direction=-1,
+                    confidence=conf,
+                    category="volume",
+                ))
+            else:
+                signals.append(Signal(
+                    name="cmf_neutral",
+                    direction=0,
+                    confidence=0.1,
+                    category="volume",
+                ))
+        except Exception:
+            pass
+        return signals
+
+    # ── RSI Divergence Signal ─────────────────────────────────────────────────
+
+    def _rsi_divergence_signal(self, close: pd.Series) -> List[Signal]:
+        """
+        Detect RSI divergences — powerful reversal signals.
+        Bullish divergence (price lower low, RSI higher low) → buy.
+        Bearish divergence (price higher high, RSI lower high) → sell.
+        """
+        signals = []
+        try:
+            rsi_s = rsi(close, self._s.RSI_PERIOD)
+            div = rsi_divergence(close, rsi_s, lookback=self._s.RSI_DIVERGENCE_LOOKBACK)
+
+            if div.empty:
+                return signals
+
+            div_val = int(div.iloc[-1])
+            if div_val == 1:
+                signals.append(Signal(
+                    name="rsi_divergence_bullish",
+                    direction=1,
+                    confidence=0.80,
+                    category="reversion",
+                ))
+            elif div_val == -1:
+                signals.append(Signal(
+                    name="rsi_divergence_bearish",
+                    direction=-1,
+                    confidence=0.80,
+                    category="reversion",
+                ))
+        except Exception:
+            pass
+        return signals
+
+    # ── OBV Trend Signal ──────────────────────────────────────────────────────
+
+    def _obv_signal(self, close: pd.Series, volume: pd.Series) -> List[Signal]:
+        """
+        OBV trend confirmation:
+        OBV EMA trending up with price up → bullish confirmation.
+        OBV EMA trending down with price up → bearish divergence.
+        """
+        signals = []
+        try:
+            obv_series = obv(close, volume)
+            obv_ema = obv_series.ewm(span=self._s.OBV_EMA_PERIOD, adjust=False).mean()
+
+            if len(obv_ema.dropna()) < 3:
+                return signals
+
+            obv_now = float(obv_ema.iloc[-1])
+            obv_prev = float(obv_ema.iloc[-3])
+            price_now = float(close.iloc[-1])
+            price_prev = float(close.iloc[-3])
+
+            obv_rising = obv_now > obv_prev
+            price_rising = price_now > price_prev
+
+            if obv_rising and price_rising:
+                # OBV confirms price up move — bullish
+                conf = min(1.0, abs(obv_now - obv_prev) / (abs(obv_prev) + 1e-9) * 10)
+                signals.append(Signal(
+                    name="obv_bullish_confirm",
+                    direction=1,
+                    confidence=min(0.75, conf + 0.3),
+                    category="volume",
+                ))
+            elif not obv_rising and not price_rising:
+                # OBV confirms price down move — bearish
+                conf = min(1.0, abs(obv_now - obv_prev) / (abs(obv_prev) + 1e-9) * 10)
+                signals.append(Signal(
+                    name="obv_bearish_confirm",
+                    direction=-1,
+                    confidence=min(0.75, conf + 0.3),
+                    category="volume",
+                ))
+            elif not obv_rising and price_rising:
+                # OBV divergence — price up but OBV falling → bearish divergence
+                signals.append(Signal(
+                    name="obv_bearish_divergence",
+                    direction=-1,
+                    confidence=0.60,
+                    category="volume",
+                ))
+            elif obv_rising and not price_rising:
+                # OBV divergence — price down but OBV rising → bullish divergence
+                signals.append(Signal(
+                    name="obv_bullish_divergence",
+                    direction=1,
+                    confidence=0.60,
+                    category="volume",
+                ))
+        except Exception:
+            pass
+        return signals
+
+    # ── Squeeze Momentum Signal ───────────────────────────────────────────────
+
+    def _squeeze_signal(
+        self, close: pd.Series, high: pd.Series, low: pd.Series
+    ) -> List[Signal]:
+        """
+        Squeeze Momentum (John Carter / LazyBear):
+        After squeeze fires (squeeze_off after squeeze_on), follow momentum direction.
+        Rising positive momentum → bullish.
+        Falling negative momentum → bearish.
+        Extremely high confidence when squeeze just released.
+        """
+        signals = []
+        try:
+            sq = squeeze_momentum(
+                close, high, low,
+                bb_period=self._s.SQUEEZE_BB_PERIOD,
+                kc_period=self._s.SQUEEZE_KC_PERIOD,
+            )
+            if len(sq.dropna(subset=["momentum"])) < 3:
+                return signals
+
+            mom_now = float(sq["momentum"].iloc[-1])
+            mom_prev = float(sq["momentum"].iloc[-2]) if len(sq) >= 2 else mom_now
+            was_squeezing = bool(sq["squeeze_on"].iloc[-2]) if len(sq) >= 2 else False
+            currently_squeezing = bool(sq["squeeze_on"].iloc[-1])
+
+            # Squeeze just released (high-conviction breakout setup)
+            squeeze_released = was_squeezing and not currently_squeezing
+
+            if pd.isna(mom_now):
+                return signals
+
+            if mom_now > 0 and mom_now > mom_prev:
+                # Rising positive momentum → bullish
+                conf = 0.80 if squeeze_released else 0.55
+                signals.append(Signal(
+                    name="squeeze_bullish",
+                    direction=1,
+                    confidence=conf,
+                    category="squeeze",
+                ))
+            elif mom_now < 0 and mom_now < mom_prev:
+                # Falling negative momentum → bearish
+                conf = 0.80 if squeeze_released else 0.55
+                signals.append(Signal(
+                    name="squeeze_bearish",
+                    direction=-1,
+                    confidence=conf,
+                    category="squeeze",
+                ))
+            elif mom_now > 0 and mom_now < mom_prev:
+                # Momentum fading — weakening bull
+                signals.append(Signal(
+                    name="squeeze_bull_fade",
+                    direction=0,
+                    confidence=0.2,
+                    category="squeeze",
+                ))
+            elif mom_now < 0 and mom_now > mom_prev:
+                # Momentum fading — weakening bear
+                signals.append(Signal(
+                    name="squeeze_bear_fade",
+                    direction=0,
+                    confidence=0.2,
+                    category="squeeze",
+                ))
         except Exception:
             pass
         return signals

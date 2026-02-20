@@ -1,25 +1,35 @@
-# fly.toml app configuration file generated for bybit-futures-bot on 2026-02-20T15:03:17+09:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# fly.toml — Bybit Futures Bot
+# Fly.io 최저비용 설정: shared-cpu-1x 256MB ≈ $2.02/월 + 1GB 볼륨 $0.15/월
+# 총 약 $2.17/월 (약 3,100원)
 
 app = "bybit-futures-bot"
-primary_region = "nrt"
+primary_region = "nrt"  # 도쿄 (한국에서 가장 가까운 무료 리전)
 
 [build]
 
 [env]
   TZ = "Asia/Seoul"
   PYTHONUNBUFFERED = "1"
+  PYTHONDONTWRITEBYTECODE = "1"  # .pyc 파일 미생성 → 메모리 절약
 
-[mounts]
+# ── 크래시 시 자동 재시작 ─────────────────────────────────────────────────────
+[[restart]]
+  policy = "always"
+  max_retries = 5
+
+# ── 배포 전략 ─────────────────────────────────────────────────────────────────
+[deploy]
+  strategy = "immediate"   # 롤링 배포 대신 즉시 교체 (단일 머신이므로)
+
+# ── 영구 볼륨 (DB, 로그 저장) ─────────────────────────────────────────────────
+# 1GB = $0.15/월, 봇 DB + 로그 충분
+[[mounts]]
   source = "bot_data"
   destination = "/app/data"
 
-[metrics]
-  port = 9091
-  path = "/metrics"
-
+# ── VM 스펙 ───────────────────────────────────────────────────────────────────
+# shared-cpu-1x 256MB = Fly.io 최저가 ($2.02/월)
+# 512MB는 추가 과금됨 → 256MB 유지
 [[vm]]
   memory = "256mb"
   cpu_kind = "shared"

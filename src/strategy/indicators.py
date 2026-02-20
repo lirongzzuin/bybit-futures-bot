@@ -274,6 +274,201 @@ def keltner_channel(
     return pd.DataFrame({"upper": upper, "mid": mid, "lower": lower, "pct_k": pct_k})
 
 
+# ── Stochastic RSI ────────────────────────────────────────────────────────────
+
+def stoch_rsi(
+    close: pd.Series,
+    rsi_period: int = 14,
+    stoch_period: int = 14,
+    smooth_k: int = 3,
+    smooth_d: int = 3,
+) -> pd.DataFrame:
+    """
+    Stochastic RSI — applies Stochastic oscillator formula to RSI values.
+    K line (smoothed): current RSI position within RSI range over stoch_period
+    D line: signal line = smoothed K
+
+    Returns DataFrame: k, d
+    Interpretation:
+      K > 80 → overbought; K < 20 → oversold
+      K crosses D from below → bullish; from above → bearish
+    Reference: Chande & Kroll (1994)
+    """
+    rsi_vals = rsi(close, rsi_period)
+    min_rsi = rsi_vals.rolling(stoch_period).min()
+    max_rsi = rsi_vals.rolling(stoch_period).max()
+    range_rsi = (max_rsi - min_rsi).replace(0, np.nan)
+    raw_k = 100 * (rsi_vals - min_rsi) / range_rsi
+    k = sma(raw_k, smooth_k)
+    d = sma(k, smooth_d)
+    return pd.DataFrame({"k": k, "d": d})
+
+
+# ── Williams %R ───────────────────────────────────────────────────────────────
+
+def williams_r(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
+) -> pd.Series:
+    """
+    Williams %R oscillator.
+    Range: -100 (oversold) to 0 (overbought)
+    Threshold: above -20 = overbought; below -80 = oversold
+    Reference: Larry Williams (1973)
+    """
+    highest_high = high.rolling(period).max()
+    lowest_low = low.rolling(period).min()
+    range_hl = (highest_high - lowest_low).replace(0, np.nan)
+    return -100 * (highest_high - close) / range_hl
+
+
+# ── Chaikin Money Flow (CMF) ──────────────────────────────────────────────────
+
+def cmf(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 20,
+) -> pd.Series:
+    """
+    Chaikin Money Flow — measures buying/selling pressure using volume and price.
+    Range: -1 to +1
+    CMF > 0.1 → buying pressure (bullish)
+    CMF < -0.1 → selling pressure (bearish)
+    Reference: Marc Chaikin (1980s)
+    """
+    hl_range = (high - low).replace(0, np.nan)
+    money_flow_multiplier = ((close - low) - (high - close)) / hl_range
+    money_flow_volume = money_flow_multiplier * volume
+    cmf_val = money_flow_volume.rolling(period).sum() / volume.rolling(period).sum().replace(0, np.nan)
+    return cmf_val
+
+
+# ── RSI Divergence ────────────────────────────────────────────────────────────
+
+def rsi_divergence(
+    close: pd.Series,
+    rsi_series: pd.Series,
+    lookback: int = 14,
+) -> pd.Series:
+    """
+    Detect bullish and bearish RSI divergences — checks only the latest bar.
+    Optimised for live trading: O(1) computation (no Python loop over all bars).
+    Returns a Series where only the last value is meaningful:
+       +1  = bullish divergence (price lower low, RSI higher low)
+       -1  = bearish divergence (price higher high, RSI lower high)
+        0  = no divergence
+    """
+    result = pd.Series(0, index=close.index)
+
+    if len(close) < lookback + 2:
+        return result
+
+    # Only compute for the last bar (live trading only needs current signal)
+    i = len(close) - 1
+    window_close = close.iloc[i - lookback: i + 1]
+    window_rsi = rsi_series.iloc[i - lookback: i + 1]
+
+    curr_close = window_close.iloc[-1]
+    curr_rsi = window_rsi.iloc[-1]
+    prev_close_min = window_close.iloc[:-1].min()
+    prev_close_max = window_close.iloc[:-1].max()
+    prev_rsi_at_low = window_rsi.iloc[:-1].min()
+    prev_rsi_at_high = window_rsi.iloc[:-1].max()
+
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    if curr_close < prev_close_min and curr_rsi > prev_rsi_at_low:
+        result.iloc[i] = 1
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    elif curr_close > prev_close_max and curr_rsi < prev_rsi_at_high:
+        result.iloc[i] = -1
+
+    return result
+
+
+# ── On-Balance Volume (OBV) ───────────────────────────────────────────────────
+
+def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """
+    On-Balance Volume — cumulative volume indicator.
+    OBV trending up when price rises → confirms bullish move.
+    OBV trending down when price rises → bearish divergence.
+    Reference: Joe Granville (1963)
+    """
+    direction = np.where(close > close.shift(1), 1, np.where(close < close.shift(1), -1, 0))
+    return (pd.Series(direction, index=close.index) * volume).cumsum()
+
+
+# ── Squeeze Momentum (LazyBear adaptation) ────────────────────────────────────
+
+def squeeze_momentum(
+    close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    bb_period: int = 20,
+    bb_std: float = 2.0,
+    kc_period: int = 20,
+    kc_atr_mult: float = 1.5,
+) -> pd.DataFrame:
+    """
+    Squeeze Momentum indicator (LazyBear / John Carter).
+    Detects when Bollinger Bands are inside Keltner Channels (squeeze).
+
+    Returns DataFrame:
+      momentum: linear regression of (close - midpoint) — direction of move
+      squeeze_on: True when BB inside KC (low volatility, coiling)
+      squeeze_off: True when BB outside KC (volatility expansion)
+    Reference: John Carter "Mastering the Trade" (2005)
+    """
+    bb = bollinger_bands(close, bb_period, bb_std)
+    kc = keltner_channel(close, high, low, kc_period, kc_atr_mult)
+
+    squeeze_on = (bb["upper"] < kc["upper"]) & (bb["lower"] > kc["lower"])
+
+    # Momentum value: delta from midpoint (high+low)/2 averaged with midline
+    mid = (high.rolling(kc_period).max() + low.rolling(kc_period).min()) / 2
+    mid_close_avg = (mid + close.ewm(span=kc_period).mean()) / 2
+    delta = close - mid_close_avg
+
+    # Vectorized linear regression endpoint (fully O(n), no Python loops)
+    # For window of length L, x=[0..L-1]:
+    #   sum_x  = L*(L-1)/2,  sum_x2 = (L-1)*L*(2L-1)/6  (constants)
+    #   b = (L*roll_sum_xy - sum_x*roll_sum_y) / (L*sum_x2 - sum_x^2)
+    #   a = (roll_sum_y - b*sum_x) / L
+    #   endpoint value = a + b*(L-1)
+    def _linreg_endpoint(s: pd.Series, length: int) -> pd.Series:
+        L = length
+        x = np.arange(L, dtype=float)
+        sum_x = x.sum()                           # L*(L-1)/2
+        sum_x2 = (x * x).sum()                    # (L-1)*L*(2L-1)/6
+        denom = L * sum_x2 - sum_x ** 2           # constant
+
+        weights_xy = x / denom                    # for Σxy term
+        weights_y = (sum_x2 - sum_x * x) / denom  # for endpoint = a + b*(L-1)
+
+        # endpoint = Σ( weights_y[i] * y[i] ) + last_x * Σ( weights_xy[i] * y[i] )
+        # combine into single weight vector for rolling dot product
+        endpoint_weights = weights_y + (L - 1) * weights_xy
+
+        # Rolling dot product via convolution
+        vals = s.values.astype(float)
+        kernel = endpoint_weights[::-1]
+        conv = np.convolve(vals, kernel, mode="full")[:len(vals)]
+        conv[:L - 1] = np.nan
+        # NaN propagation: if any value in window is NaN, output is NaN
+        nan_mask = pd.Series(vals).rolling(L).apply(lambda w: np.any(np.isnan(w)), raw=True)
+        result = pd.Series(conv, index=s.index)
+        result[nan_mask == 1] = np.nan
+        return result
+
+    momentum = _linreg_endpoint(delta, kc_period)
+    return pd.DataFrame({
+        "momentum": momentum,
+        "squeeze_on": squeeze_on,
+        "squeeze_off": ~squeeze_on,
+    })
+
+
 # ── Session VWAP ──────────────────────────────────────────────────────────────
 
 def session_vwap(df: pd.DataFrame, session_start_utc_hour: int = 0) -> pd.Series:

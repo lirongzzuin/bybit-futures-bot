@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
+
+# Korean Standard Time = UTC+9
+_KST = timezone(timedelta(hours=9))
 
 from src.logger import get_logger
 
@@ -276,4 +279,5 @@ class SlackNotifier:
 
 
 def _now() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    """Return current time formatted in Korean Standard Time (KST, UTC+9)."""
+    return datetime.now(tz=_KST).strftime("%Y-%m-%d %H:%M KST")
