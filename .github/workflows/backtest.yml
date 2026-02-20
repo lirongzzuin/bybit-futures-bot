@@ -1,0 +1,63 @@
+name: Backtest Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Space-separated symbols (e.g. BTCUSDT ETHUSDT)'
+        required: false
+        default: 'BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT'
+      years:
+        description: 'Years of data'
+        required: false
+        default: '5'
+  schedule:
+    # Run backtest every Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create directories
+        run: mkdir -p logs reports data_cache
+
+      - name: Run backtest
+        env:
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          BYBIT_TESTNET: 'false'
+          TRADING_MODE: 'dry-run'
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          QUALITY_GATE_SHARPE: '1.0'
+          QUALITY_GATE_MDD: '0.30'
+          QUALITY_GATE_WIN_RATE: '0.45'
+          QUALITY_GATE_PROFIT_FACTOR: '1.5'
+          QUALITY_GATE_MIN_TRADES: '100'
+        run: |
+          python -m src.backtest.engine \
+            --symbols ${{ github.event.inputs.symbols || 'BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT' }} \
+            --years ${{ github.event.inputs.years || '5' }} \
+            --interval 15
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-report-${{ github.run_number }}
+          path: reports/
+          retention-days: 30

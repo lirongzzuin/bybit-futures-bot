@@ -1,0 +1,91 @@
+name: Paper Trading (GitHub Actions)
+
+# ──────────────────────────────────────────────────────────────
+# ALTERNATIVE DEPLOYMENT: GitHub Actions Scheduled Bot
+# For users who cannot use Oracle Cloud.
+# Limitations: max 2000 min/month free, minimum 5-min interval.
+#
+# For continuous operation, prefer the Oracle Cloud deployment.
+# ──────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Every 15 minutes (matches SIGNAL_TIMEFRAME=15)
+    # NOTE: GitHub Actions minimum is 5 minutes; cron syntax supports this
+    - cron: '*/15 * * * *'
+  workflow_dispatch:  # manual trigger
+
+concurrency:
+  group: paper-trading
+  cancel-in-progress: false  # never cancel a running cycle
+
+jobs:
+  run-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            bot.db
+            data_cache/
+          key: bot-state-${{ github.run_number }}
+          restore-keys: |
+            bot-state-
+
+      - name: Create directories
+        run: mkdir -p logs reports data_cache
+
+      - name: Run single bot cycle
+        env:
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          BYBIT_TESTNET: ${{ secrets.BYBIT_TESTNET || 'true' }}
+          TRADING_MODE: ${{ secrets.TRADING_MODE || 'paper' }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          QUALITY_GATE_PASSED: ${{ secrets.QUALITY_GATE_PASSED || 'false' }}
+          MAX_RISK_PER_TRADE_PCT: '0.01'
+          MAX_LEVERAGE_CAP: '20'
+          PAPER_CAPITAL_USDT: '10000'
+        run: |
+          python -c "
+          import os, sys
+          os.environ.setdefault('DATABASE_PATH', 'bot.db')
+          from src.config import settings
+          from src.main import TradingBot
+          bot = TradingBot()
+          bot.run_cycle()
+          print('Cycle complete')
+          "
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: |
+            bot.db
+            data_cache/
+          key: bot-state-${{ github.run_number }}
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7

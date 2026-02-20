@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    image: bybit-futures-bot:latest
+    container_name: bybit-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Logs: persistent on host for easy tailing
+      - ./logs:/app/logs
+      # DB: persistent on host (don't lose trade history on rebuild)
+      - ./bot.db:/app/bot.db
+      # Reports: backtest markdown reports
+      - ./reports:/app/reports
+    environment:
+      - TZ=Asia/Seoul
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+
+  # ── Backtest runner (run separately, does not start with the bot) ──
+  backtest:
+    build: .
+    image: bybit-futures-bot:latest
+    container_name: bybit-backtest
+    env_file:
+      - .env
+    volumes:
+      - ./reports:/app/reports
+      - ./bot.db:/app/bot.db
+    environment:
+      - TZ=Asia/Seoul
+    command: >
+      python -m src.backtest.engine
+      --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT
+      --years 2
+      --interval 5
+    profiles:
+      - backtest

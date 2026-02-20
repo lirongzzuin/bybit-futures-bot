@@ -1,0 +1,87 @@
+# ── Sensitive — NEVER COMMIT ──────────────────────────────────
+.env
+.env.local
+.env.production
+.env.staging
+.env.*.local
+# Allow only the template
+!.env.example
+*.secret
+secrets/
+__secrets__/
+# Keys / certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+# Credentials
+credentials*.json
+token*.json
+*.token
+service_account*.json
+# API keys in any format
+api_keys.txt
+api_keys.yaml
+api_keys.yml
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-wheel-metadata/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# ── Bot Output ────────────────────────────────────────────────
+logs/
+reports/
+data_cache/
+bot.db
+bot.db-shm
+bot.db-wal
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Test & Coverage ───────────────────────────────────────────
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+.tox/
+junit*.xml
+
+# ── IDE ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.iml
+
+# ── Docker ────────────────────────────────────────────────────
+*.dockerignore
+
+# ── Cache & Data ──────────────────────────────────────────────
+.cache/
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# ── Pre-commit ────────────────────────────────────────────────
+.pre-commit-config.yaml.bak

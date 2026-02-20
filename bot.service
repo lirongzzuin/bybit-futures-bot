@@ -1,0 +1,33 @@
+[Unit]
+Description=Bybit Futures Trading Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/bybit-futures-bot
+EnvironmentFile=/home/ubuntu/bybit-futures-bot/.env
+ExecStart=/home/ubuntu/bybit-futures-bot/venv/bin/python -m src.main
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# Restart on failure (not on clean exit)
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=append:/home/ubuntu/bybit-futures-bot/logs/bot.log
+StandardError=append:/home/ubuntu/bybit-futures-bot/logs/bot.log
+
+# Resource limits (Oracle Free Tier: 1 GB RAM)
+MemoryMax=400M
+CPUQuota=50%
+
+# Watchdog
+WatchdogSec=600
+
+[Install]
+WantedBy=multi-user.target
