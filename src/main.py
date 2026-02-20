@@ -670,7 +670,8 @@ def main():
         while True:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        _shutdown(None, None)
+        # Signal handler (_shutdown) already ran — just exit cleanly
+        pass
 
 
 if __name__ == "__main__":
