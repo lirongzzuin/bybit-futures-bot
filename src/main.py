@@ -210,17 +210,18 @@ class TradingBot:
             self._emergency_close_all(symbols=[symbol])
             return
 
-        # ── Daily loss limit Slack 알림 (하루 한 번, 최초 발동 시에만) ─────────
-        if guard.action == GuardAction.PAUSE and "Daily loss" in guard.reason:
+        # ── Daily loss Slack 알림 (하루 한 번, guard reason에 포함된 경우)
+        # guards.py는 이제 ALLOW를 반환하지만 reason에 "Daily loss"를 포함
+        if guard.reason and "Daily loss" in guard.reason:
             today_kst = datetime.now(tz=_KST).date().isoformat()
             if self._daily_loss_alert_sent_date != today_kst:
                 self._daily_loss_alert_sent_date = today_kst
-                # loss_pct 파싱: "Daily loss 8.33% ≥ limit 8.00%" → 0.0833
                 try:
                     loss_pct = float(guard.reason.split("%")[0].split()[-1]) / 100
                 except Exception:
                     loss_pct = settings.MAX_DAILY_LOSS_PCT
                 self._slack.send_daily_loss_limit(loss_pct)
+                log.info("Daily loss 알림 전송 — 거래는 계속 진행 (복리 모드)")
 
         # ── Check existing position ───────────────────────────────────────────
         pos = self._state_machine.get_position(symbol)
@@ -255,8 +256,11 @@ class TradingBot:
             return  # one action per symbol per cycle
 
         # ── Entry logic ───────────────────────────────────────────────────────
-        if guard.action in (GuardAction.PAUSE, GuardAction.REDUCE):
-            return  # no new entries
+        # PAUSE: 극단적 스프레드(>1%) 시에만 진입 중지 (daily/weekly 손실은 허용)
+        # REDUCE: 높은 변동성 시 레버리지 축소 (진입 자체는 허용)
+        if guard.action == GuardAction.PAUSE:
+            log.debug("Guard PAUSE: %s — 신규 진입 건너뜀", guard.reason)
+            return  # 극단적 스프레드 시에만 진입 중지
 
         if combined.direction == 0:
             return
@@ -332,11 +336,19 @@ class TradingBot:
 
         if order and order.status.value in ("FILLED", "PENDING"):
             entry_price = order.avg_price or snap.last_price
+            qty = float(order.qty)
+            # 진입 수수료: Market 주문 → Taker(0.055%), Limit/GTC → Maker(0.020%)
+            entry_fee_rate = (
+                settings.BACKTEST_FEE_TAKER
+                if order.order_type == "Market"
+                else settings.BACKTEST_FEE_MAKER
+            )
+            entry_fee = qty * entry_price * entry_fee_rate
             trade_id = self._db.insert_trade_open(
                 symbol=symbol,
                 side="Buy" if direction == 1 else "Sell",
                 entry_price=entry_price,
-                qty=float(order.qty),
+                qty=qty,
                 leverage=risk_params.leverage,
                 mode=settings.TRADING_MODE,
             )
@@ -344,7 +356,7 @@ class TradingBot:
                 symbol=symbol,
                 direction=direction,
                 entry_price=entry_price,
-                qty=float(order.qty),
+                qty=qty,
                 leverage=risk_params.leverage,
                 stop_price=risk_params.stop_price,
                 take_profit_price=risk_params.take_profit_price,
@@ -356,6 +368,7 @@ class TradingBot:
                 trade_mode=risk_params.trade_mode,
                 mode_max_bars=risk_params.mode_max_bars,
                 partial_exit_pct=risk_params.partial_exit_pct,
+                entry_fee=entry_fee,
             )
             # Store trade_id in state for later close update
             self._db.set_state(f"trade_id:{symbol}", trade_id)
@@ -390,11 +403,21 @@ class TradingBot:
 
         if order:
             exit_price = order.avg_price or current_price
-            pnl = self._state_machine.partial_exit(symbol, qty_to_close, exit_price)
+            partial_pct = pos.partial_exit_pct
+
+            # 진입 수수료 pro-rata: partial_exit() 호출 전에 캡처
+            # (partial_exit 내에서 pos.entry_fee가 감소하기 때문)
+            entry_fee_for_partial = pos.entry_fee * partial_pct
+
+            pnl = self._state_machine.partial_exit(
+                symbol, qty_to_close, exit_price, partial_pct=partial_pct
+            )
 
             notional = qty_to_close * exit_price
-            # PARTIAL_TP1 closes with a limit order → maker fee
-            fee = notional * settings.BACKTEST_FEE_MAKER
+            # PARTIAL_TP1: Limit(Maker) 청산 수수료 + 진입 수수료 pro-rata
+            partial_exit_fee = notional * settings.BACKTEST_FEE_MAKER
+            fee = partial_exit_fee + entry_fee_for_partial
+            pnl_net = pnl - fee
 
             trade_id = self._db.get_state(f"trade_id:{symbol}")
             if trade_id:
@@ -410,24 +433,25 @@ class TradingBot:
                 self._db.update_trade_close(
                     trade_id=partial_trade_id,
                     exit_price=exit_price,
-                    pnl=pnl,
-                    fee=fee,
+                    pnl=pnl_net,   # net PnL (수수료 차감 후)
+                    fee=fee,       # 진입 pro-rata + 청산 수수료 합산
                     reason="PARTIAL_TP1",
                 )
 
             log.info(
-                "Partial TP1 exit %s | closed=%.4f pnl=%.4f stop→breakeven",
-                symbol, qty_to_close, pnl,
+                "Partial TP1 exit %s | closed=%.4f gross_pnl=%.4f fee=%.4f "
+                "net_pnl=%.4f stop→breakeven",
+                symbol, qty_to_close, pnl, fee, pnl_net,
             )
 
-            # Slack: 부분 청산(TP1) 알림
+            # Slack: 부분 청산(TP1) 알림 — net PnL 기준
             side_str = "Buy" if direction == 1 else "Sell"
-            pnl_pct = pnl / (pos.entry_price * qty_to_close) if pos.entry_price > 0 and qty_to_close > 0 else 0.0
+            pnl_pct = pnl_net / (pos.entry_price * qty_to_close) if pos.entry_price > 0 and qty_to_close > 0 else 0.0
             self._slack.send_position_closed(
                 symbol=symbol,
                 side=side_str,
                 reason="PARTIAL_TP1",
-                pnl=pnl,
+                pnl=pnl_net,
                 pnl_pct=pnl_pct,
             )
 
@@ -445,37 +469,50 @@ class TradingBot:
 
         if order:
             exit_price = order.avg_price or current_price
+
+            # 남은 포지션 정보 캡처 (exit() 호출 전에)
+            remaining_qty = pos.qty
+            entry = pos.entry_price
+            remaining_entry_fee = pos.entry_fee  # partial_exit 후 남은 진입 수수료
+
             pnl = self._state_machine.exit(symbol, exit_price)
 
             # Fee rate: STOP_LOSS/GUARD*/LIQUIDATION* → 시장가(Taker, 0.055%)
             # TRAILING_STOP/TIME_EXIT/REGIME_CHANGE/SIGNAL_FLIP → 지정가(Maker, 0.020%)
             # 주의: "STOP" substring은 "TRAILING_STOP"도 매칭되므로 exact match 사용
-            notional = pos.qty * exit_price
-            fee_rate = (
+            notional = remaining_qty * exit_price
+            exit_fee_rate = (
                 settings.BACKTEST_FEE_TAKER
                 if (reason == "STOP_LOSS" or "GUARD" in reason or "LIQUIDATION" in reason)
                 else settings.BACKTEST_FEE_MAKER
             )
-            fee = notional * fee_rate
+            exit_fee = notional * exit_fee_rate
+            # 진입 수수료(남은 비율) + 청산 수수료 합산 → 완전한 round-trip 수수료
+            total_fee = remaining_entry_fee + exit_fee
+            pnl_net = pnl - total_fee
 
             trade_id = self._db.get_state(f"trade_id:{symbol}")
             if trade_id:
                 self._db.update_trade_close(
                     trade_id=trade_id,
                     exit_price=exit_price,
-                    pnl=pnl,
-                    fee=fee,
+                    pnl=pnl_net,    # net PnL (수수료 차감 후)
+                    fee=total_fee,  # 진입 + 청산 수수료 합산
                     reason=reason,
                 )
 
+            log.info(
+                "Exit %s | reason=%s gross_pnl=%.4f fee=%.4f (entry_fee=%.4f exit_fee=%.4f) net_pnl=%.4f",
+                symbol, reason, pnl, total_fee, remaining_entry_fee, exit_fee, pnl_net,
+            )
+
             side_str = "Buy" if direction == 1 else "Sell"
-            entry = pos.entry_price
-            pnl_pct = pnl / (entry * pos.qty) if entry > 0 and pos.qty > 0 else 0
+            pnl_pct = pnl_net / (entry * remaining_qty) if entry > 0 and remaining_qty > 0 else 0
             self._slack.send_position_closed(
                 symbol=symbol,
                 side=side_str,
                 reason=reason,
-                pnl=pnl,
+                pnl=pnl_net,
                 pnl_pct=pnl_pct,
             )
 

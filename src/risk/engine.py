@@ -246,6 +246,23 @@ class RiskEngine:
                 f"Position notional {notional:.2f} < minimum {min_notional:.2f}"
             )
 
+        # ── Step 7b: 수수료 손익분기점 체크 ──────────────────────────────────
+        # TP1 도달 시 예상 수익이 수수료(진입 + 청산)의 2배 이상이어야 진입.
+        # round-trip: 진입 MAKER(0.020%) + TP1 청산 MAKER(0.020%) + 슬리피지×2
+        # GTC 주문은 대부분 Maker 체결이지만 fee_safety_multiplier=2.0으로 여유 확보.
+        round_trip_fee_pct = (
+            self._s.BACKTEST_FEE_MAKER * 2 + self._s.BACKTEST_SLIPPAGE_PCT * 2
+        )
+        tp1_move_pct = (atr * tp1_atr_mult) / entry_price
+        fee_safety_multiplier = 2.0  # TP1 수익이 수수료의 최소 2배 (강화)
+        # SCALP: ATR=0.107% → TP1=0.161% > fee×2.0=0.160% ✓ (최소 통과선 ATR 0.107%)
+        # TREND: ATR=0.054% → TP1=0.161% > fee×2.0=0.160% ✓ (더 여유 있음)
+        if tp1_move_pct < round_trip_fee_pct * fee_safety_multiplier:
+            return self._no_trade(
+                f"TP1 예상수익 {tp1_move_pct:.4%} < 수수료×{fee_safety_multiplier:.1f} "
+                f"{round_trip_fee_pct * fee_safety_multiplier:.4%} — 수수료 손익분기 미달"
+            )
+
         # ── Step 8: Liquidation distance check ────────────────────────────────
         # Require liquidation price to be at least 3× the stop distance away.
         # Bybit USDT-perpetual maintenance margin rate ≈ 0.5% for most symbols.

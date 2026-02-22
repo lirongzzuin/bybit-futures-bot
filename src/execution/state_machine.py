@@ -60,6 +60,7 @@ class PositionInfo:
     trailing_stop_distance: float = 0.0
     highest_price: float = 0.0   # for long trailing stop
     lowest_price: float = 0.0    # for short trailing stop
+    entry_fee: float = 0.0       # 진입 수수료 (pro-rata 추적용)
     entry_ts: float = 0.0
     last_exit_ts: float = 0.0    # for cooldown
     consecutive_losses: int = 0
@@ -136,6 +137,7 @@ class StateMachine:
         trade_mode: str = "SCALP",
         mode_max_bars: int = 15,
         partial_exit_pct: float = 0.60,
+        entry_fee: float = 0.0,
     ) -> bool:
         pos = self.get_position(symbol)
         if not pos.is_flat:
@@ -158,6 +160,7 @@ class StateMachine:
         pos.trailing_stop_distance = trailing_distance
         pos.highest_price = entry_price
         pos.lowest_price = entry_price
+        pos.entry_fee = entry_fee
         pos.entry_ts = time.time()
         pos.order_id = order_id
         pos.entry_reason = reason
@@ -307,11 +310,22 @@ class StateMachine:
 
     # ── Partial Exit ──────────────────────────────────────────────────────────
 
-    def partial_exit(self, symbol: str, qty_to_close: float, exit_price: float) -> float:
+    def partial_exit(
+        self,
+        symbol: str,
+        qty_to_close: float,
+        exit_price: float,
+        partial_pct: float = 0.0,
+    ) -> float:
         """
         Close `qty_to_close` units of the position at `exit_price`.
         Moves stop to breakeven, sets take_profit to tp2.
-        Returns realised PnL for the closed portion.
+        Returns realised gross PnL for the closed portion.
+
+        partial_pct: fraction of original position being closed (0-1).
+                     Used to pro-rate entry_fee (residual entry_fee kept for
+                     remaining portion). Caller should capture entry_fee *before*
+                     this call to compute the correct total fee.
         """
         pos = self.get_position(symbol)
         if pos.is_flat or qty_to_close <= 0:
@@ -325,6 +339,11 @@ class StateMachine:
         # Reduce position size
         pos.qty = max(0.0, pos.qty - qty_to_close)
 
+        # Pro-rate entry_fee: consumed fraction goes with closed portion,
+        # remaining fraction stays with the open remainder.
+        if partial_pct > 0:
+            pos.entry_fee = pos.entry_fee * (1.0 - partial_pct)
+
         # Move stop to breakeven, target to TP2
         pos.stop_price = pos.entry_price
         pos.take_profit_price = pos.tp2_price
@@ -332,8 +351,9 @@ class StateMachine:
 
         log.info(
             "Partial exit %s | closed=%.4f remaining=%.4f pnl=%.4f "
-            "stop_moved_to=%.4f tp2=%.4f",
+            "stop_moved_to=%.4f tp2=%.4f remaining_entry_fee=%.6f",
             symbol, qty_to_close, pos.qty, pnl, pos.stop_price, pos.tp2_price,
+            pos.entry_fee,
         )
         return pnl
 
@@ -371,6 +391,7 @@ class StateMachine:
         pos.tp2_price = 0.0
         pos.tp1_hit = False
         pos.trailing_stop_distance = 0.0
+        pos.entry_fee = 0.0
         pos.order_id = None
 
         return pnl
@@ -394,6 +415,7 @@ class StateMachine:
         pos.tp2_price = 0.0
         pos.tp1_hit = False
         pos.trailing_stop_distance = 0.0
+        pos.entry_fee = 0.0
         pos.order_id = None
 
     # ── Sync with exchange ────────────────────────────────────────────────────
