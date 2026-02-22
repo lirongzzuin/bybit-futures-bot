@@ -132,10 +132,12 @@ class SignalCombiner:
         elif regime == Regime.TRENDING_DOWN:
             total_long *= 0.4
 
-        # High volatility: reduce all scores (caution mode)
+        # High volatility: slight reduction (still allow breakout scalps)
+        # 0.75 instead of 0.6 → raw score of 0.56 passes threshold 0.42
+        # Volatile markets = larger ATR = bigger potential scalp profits
         if regime == Regime.HIGH_VOLATILITY:
-            total_long *= 0.6
-            total_short *= 0.6
+            total_long *= 0.75
+            total_short *= 0.75
 
         # ── Determine direction and strength ──────────────────────────────────
         threshold = self._s.SIGNAL_ENTRY_THRESHOLD

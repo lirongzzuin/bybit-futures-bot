@@ -22,43 +22,43 @@ class Settings(BaseSettings):
 
     # ── Capital & Risk ────────────────────────────────────────
     PAPER_CAPITAL_USDT: float = 10000.0
-    MAX_RISK_PER_TRADE_PCT: float = 0.015      # 1.5% equity risk per trade
-    MAX_DAILY_LOSS_PCT: float = 0.05           # 5% → halt trading for today
-    MAX_WEEKLY_LOSS_PCT: float = 0.10          # 10% → halt for the week
-    MAX_DRAWDOWN_PCT: float = 0.25             # 25% → switch to conservative
-    MAX_LEVERAGE_CAP: int = 20                 # risk-engine ceiling (not exchange)
+    MAX_RISK_PER_TRADE_PCT: float = 0.02       # 2% equity risk per trade (aggressive compounding)
+    MAX_DAILY_LOSS_PCT: float = 0.08           # 8% → halt trading for today
+    MAX_WEEKLY_LOSS_PCT: float = 0.15          # 15% → halt for the week
+    MAX_DRAWDOWN_PCT: float = 0.30             # 30% → switch to conservative
+    MAX_LEVERAGE_CAP: int = 10                 # 10× max leverage
     MAX_CONCURRENT_POSITIONS: int = 3
-    MAX_TOTAL_EXPOSURE_PCT: float = 0.60       # 60% of equity exposed
-    MAX_SINGLE_EXPOSURE_PCT: float = 0.25      # 25% per symbol
+    MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
+    MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.48       # combined strength to enter
-    SIGNAL_EXIT_THRESHOLD: float = 0.40
-    SIGNAL_TIMEFRAME: str = "5"                # minutes; Bybit interval string (scalp default)
+    SIGNAL_ENTRY_THRESHOLD: float = 0.42       # lower threshold for high-frequency scalping
+    SIGNAL_EXIT_THRESHOLD: float = 0.35
+    SIGNAL_TIMEFRAME: str = "5"                # 5-minute scalping
     TREND_TIMEFRAME: str = "60"                # higher timeframe for regime detection
     UNIVERSE_REFRESH_INTERVAL_HOURS: int = 4
-    TOP_N_COINS: int = 5
+    TOP_N_COINS: int = 10                      # more symbols = more opportunities
 
     # ── Scalping Parameters ───────────────────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.0               # tight stop for scalp mode
-    SCALP_TP1_ATR: float = 1.5                # first TP level
-    SCALP_TP2_ATR: float = 2.8                # second TP level (after breakeven)
-    SCALP_MAX_BARS: int = 15                   # max bars to hold in scalp mode
-    SCALP_PARTIAL_EXIT_PCT: float = 0.60       # close 60% at TP1
+    SCALP_STOP_ATR: float = 1.0               # tight stop for scalping
+    SCALP_TP1_ATR: float = 1.5                # TP1 at 1.5× stop (R:R 1.5)
+    SCALP_TP2_ATR: float = 3.0                # TP2 at 3.0× stop (R:R 3.0)
+    SCALP_MAX_BARS: int = 12                   # quick exit — 1 hour max on 5m bars
+    SCALP_PARTIAL_EXIT_PCT: float = 0.60       # close 60% at TP1 — lock profit fast
 
     # ── Trend Ride Parameters ─────────────────────────────────────
-    TREND_STOP_ATR: float = 1.5               # wider stop for trend ride
-    TREND_TP1_ATR: float = 2.0                # first TP for trend ride
-    TREND_TP2_ATR: float = 4.0                # second TP for trend ride
+    TREND_STOP_ATR: float = 2.0               # wide stop for genuine trend ride
+    TREND_TP1_ATR: float = 3.0                # first TP at 1.5× stop
+    TREND_TP2_ATR: float = 6.0                # final TP at 3× stop for full trend capture
     TREND_MAX_BARS: int = 120                  # max bars in trend ride
-    TREND_PARTIAL_EXIT_PCT: float = 0.50       # close 50% at TP1
-    TREND_RIDE_SCORE_THRESHOLD: int = 2        # score needed to switch to TREND_RIDE
+    TREND_PARTIAL_EXIT_PCT: float = 0.40       # close 40% at TP1, keep 60% for full run
+    TREND_RIDE_SCORE_THRESHOLD: int = 2        # allow trend ride more often
 
     # ── Signal Quality Filters (Kaufman / Peters) ─────────────────
-    SIGNAL_FILTER_ER_THRESHOLD: float = 0.08    # 50-bar ER min for 5-min crypto (0.10-0.30 typical)
-    SIGNAL_FILTER_HURST_MIN: float = 0.45       # Hurst exponent min for momentum
-    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.0004   # Min ATR as % of price (dead market)
+    SIGNAL_FILTER_ER_THRESHOLD: float = 0.06    # permissive ER for high-frequency scalping
+    SIGNAL_FILTER_HURST_MIN: float = 0.40       # allow lower Hurst for scalping
+    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.001    # min 0.10% ATR → TP1=0.15% > 0.040% fee ✓
 
     # ── Advanced Risk Management ──────────────────────────────────
     VOLATILITY_TARGET_PCT: float = 0.15         # AQR vol-targeting (15% annualized)
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     ATR_PERIOD: int = 14
     STOP_ATR_MULTIPLIER: float = 2.0
     TP_ATR_MULTIPLIER: float = 3.0
-    TRAILING_STOP_ATR_MULTIPLIER: float = 1.5
+    TRAILING_STOP_ATR_MULTIPLIER: float = 1.0  # 1.0× ATR trailing — meaningful profit lock after TP1
     ADX_PERIOD: int = 14
     ADX_TREND_THRESHOLD: float = 25.0
     ADX_RANGE_THRESHOLD: float = 20.0
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # ── Order Execution ───────────────────────────────────────
     LIMIT_ORDER_TIMEOUT_SECONDS: int = 30
     LIMIT_ORDER_MAX_RETRIES: int = 3
-    REENTRY_COOLDOWN_SECONDS: int = 300
+    REENTRY_COOLDOWN_SECONDS: int = 300        # 5 min = 1 full bar on 5m timeframe
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
 
     # ── Backtest ─────────────────────────────────────────────

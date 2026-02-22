@@ -482,6 +482,50 @@ class BybitClient:
             log.warning("Failed to get funding balance: %s", e)
         return 0.0
 
+    def set_trading_stop(
+        self,
+        symbol: str,
+        stop_loss: Optional[str] = None,
+        take_profit: Optional[str] = None,
+        position_idx: int = 0,
+        sl_trigger_by: str = "LastPrice",
+        tp_trigger_by: str = "LastPrice",
+        sl_order_type: str = "Market",   # SL: 시장가 (긴급 즉시 실행)
+        tp_order_type: str = "Limit",    # TP: 지정가 (Maker fee 절약)
+        tp_limit_price: Optional[str] = None,  # tpOrderType=Limit 시 필수
+    ) -> Dict:
+        """
+        Set SL/TP on an open position via Bybit trading-stop API.
+        Called after fill to ensure exchange-side protection even if bot crashes.
+        position_idx: 0=One-Way, 1=Hedge Long, 2=Hedge Short
+
+        Order type policy:
+          SL → Market (slOrderType="Market"): 손절은 즉각 실행이 최우선
+          TP → Limit  (tpOrderType="Limit"):  익절은 지정가로 Maker fee 절약
+        """
+        params: Dict[str, Any] = dict(
+            category="linear",
+            symbol=symbol,
+            tpslMode="Full",
+            positionIdx=position_idx,
+        )
+        if stop_loss:
+            params["stopLoss"] = stop_loss
+            params["slTriggerBy"] = sl_trigger_by
+            params["slOrderType"] = sl_order_type
+        if take_profit:
+            params["takeProfit"] = take_profit
+            params["tpTriggerBy"] = tp_trigger_by
+            params["tpOrderType"] = tp_order_type
+            if tp_order_type == "Limit" and tp_limit_price:
+                params["tpLimitPrice"] = tp_limit_price
+        result = self._call("set_trading_stop", **params)
+        log.info(
+            "TradingStop set | %s posIdx=%d sl=%s(Market) tp=%s(%s)",
+            symbol, position_idx, stop_loss, take_profit, tp_order_type,
+        )
+        return result
+
     def amend_order(
         self, symbol: str, order_id: str, price: str, qty: Optional[str] = None
     ) -> Dict:

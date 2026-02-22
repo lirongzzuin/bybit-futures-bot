@@ -588,8 +588,8 @@ class SignalGenerator:
                 return signals
 
             # Bullish: K crosses above D in oversold zone (< 30)
-            if k_prev <= d_prev and k_now > d_now and k_now < 50:
-                conf = min(1.0, (50 - k_now) / 50 + 0.3)
+            if k_prev <= d_prev and k_now > d_now and k_now < 30:
+                conf = min(1.0, (30 - k_now) / 30 + 0.3)
                 signals.append(Signal(
                     name="stochrsi_bullish",
                     direction=1,
@@ -597,8 +597,8 @@ class SignalGenerator:
                     category="reversion",
                 ))
             # Bearish: K crosses below D in overbought zone (> 70)
-            elif k_prev >= d_prev and k_now < d_now and k_now > 50:
-                conf = min(1.0, (k_now - 50) / 50 + 0.3)
+            elif k_prev >= d_prev and k_now < d_now and k_now > 70:
+                conf = min(1.0, (k_now - 70) / 30 + 0.3)
                 signals.append(Signal(
                     name="stochrsi_bearish",
                     direction=-1,

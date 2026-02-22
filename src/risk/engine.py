@@ -246,6 +246,24 @@ class RiskEngine:
                 f"Position notional {notional:.2f} < minimum {min_notional:.2f}"
             )
 
+        # ── Step 8: Liquidation distance check ────────────────────────────────
+        # Require liquidation price to be at least 3× the stop distance away.
+        # Bybit USDT-perpetual maintenance margin rate ≈ 0.5% for most symbols.
+        maintenance_margin_rate = 0.005
+        if side == "Buy":
+            liq_price = entry_price * (1.0 - 1.0 / final_leverage + maintenance_margin_rate)
+            liq_distance = entry_price - liq_price
+        else:
+            liq_price = entry_price * (1.0 + 1.0 / final_leverage - maintenance_margin_rate)
+            liq_distance = liq_price - entry_price
+
+        min_liq_buffer = stop_distance * 3.0
+        if liq_distance < min_liq_buffer:
+            return self._no_trade(
+                f"Liquidation too close: liq_dist={liq_distance:.4f} "
+                f"< 3×stop={min_liq_buffer:.4f} (lev={final_leverage}× liq={liq_price:.4f})"
+            )
+
         log.debug(
             "Risk calc | lev=%d× qty_base=%.4f notional=%.2f margin=%.2f "
             "stop=%.4f tp1=%.4f tp2=%.4f max_loss=%.2f mode=%s",

@@ -315,8 +315,8 @@ class BacktestEngine:
             tp1_price = entry_price - atr_val * mode_params.tp1_atr
             tp_price = entry_price - atr_val * mode_params.tp2_atr
 
-        # Entry fee
-        fee = notional * self._s.BACKTEST_FEE_TAKER
+        # Entry fee — PostOnly limit orders use maker fee rate
+        fee = notional * self._s.BACKTEST_FEE_MAKER
 
         return {
             "symbol": symbol,
@@ -386,7 +386,11 @@ class BacktestEngine:
                 partial_price = partial_price - slip if direction == 1 else partial_price + slip
 
                 partial_notional = qty_partial * partial_price
-                partial_fee = partial_notional * self._s.BACKTEST_FEE_TAKER
+                # TP1 exits use limit orders → maker fee
+                partial_exit_fee = partial_notional * self._s.BACKTEST_FEE_MAKER
+                # Pro-rate the entry fee for the closed portion
+                entry_fee_for_partial = pos["fees"] * partial_pct
+                partial_fee = partial_exit_fee + entry_fee_for_partial
 
                 if direction == 1:
                     partial_pnl_gross = (partial_price - pos["entry_price"]) * qty_partial
@@ -418,7 +422,8 @@ class BacktestEngine:
 
                 # Update position: reduce qty, move stop to entry, target to tp2
                 pos["qty"] -= qty_partial
-                pos["fees"] = 0.0  # fees already accounted in partial
+                # Keep proportional entry fee for the remaining position
+                pos["fees"] = pos["fees"] * (1.0 - partial_pct)
                 pos["stop_price"] = pos["entry_price"]   # breakeven stop
                 pos["tp1_hit"] = True
                 # tp_price is already TP2 (set in _evaluate_entry)
@@ -445,13 +450,14 @@ class BacktestEngine:
             exit_price = pos["tp_price"]
             reason = "TAKE_PROFIT"
 
-        # Trailing stop
-        elif direction == 1:
+        # Trailing stop — only activate after TP1 partial exit to avoid
+        # premature firing on normal market noise before profit is secured
+        elif direction == 1 and pos.get("tp1_hit", False):
             trailing = pos["highest"] - pos["trailing_dist"]
             if low <= trailing and trailing > pos["stop_price"]:
                 exit_price = trailing
                 reason = "TRAILING_STOP"
-        elif direction == -1:
+        elif direction == -1 and pos.get("tp1_hit", False):
             trailing = pos["lowest"] + pos["trailing_dist"]
             if high >= trailing and trailing < pos["stop_price"]:
                 exit_price = trailing
@@ -474,7 +480,13 @@ class BacktestEngine:
             exit_price += slip
 
         notional = pos["qty"] * exit_price
-        exit_fee = notional * self._s.BACKTEST_FEE_TAKER
+        # SL → Market(Taker).  TAKE_PROFIT / TRAILING_STOP / TIME_EXIT → Limit(Maker).
+        # Matches live order_manager.py: urgent_keywords = ("STOP", "GUARD", "LIQUIDATION")
+        exit_fee_rate = (
+            self._s.BACKTEST_FEE_TAKER if reason == "STOP_LOSS"
+            else self._s.BACKTEST_FEE_MAKER
+        )
+        exit_fee = notional * exit_fee_rate
         total_fee = pos["fees"] + exit_fee
 
         if direction == 1:

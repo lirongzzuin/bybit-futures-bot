@@ -241,8 +241,10 @@ class StateMachine:
                 message=f"Price {current_price:.4f} ≤ TP {pos.take_profit_price:.4f}",
             )
 
-        # ── 3. Trailing stop ──────────────────────────────────────────────────
-        if pos.trailing_stop_distance > 0:
+        # ── 3. Trailing stop (only after TP1 partial exit) ────────────────────
+        # Before TP1, the hard stop handles risk. Activating trailing before TP1
+        # would create a tighter-than-intended stop that fires on normal noise.
+        if pos.trailing_stop_distance > 0 and pos.tp1_hit:
             if pos.is_long:
                 trailing_stop = pos.highest_price - pos.trailing_stop_distance
                 if current_price <= trailing_stop and current_price > pos.stop_price:
