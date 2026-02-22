@@ -8,7 +8,18 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+
+# Korean Standard Time (UTC+9)
+_KST = timezone(timedelta(hours=9))
+
+
+def _today_kst() -> str:
+    """Return today's date in KST as ISO string (e.g. '2026-02-22').
+    Fly.io 서버는 UTC 기준이므로 date.today()가 아닌 KST 기준 날짜를 사용.
+    """
+    return datetime.now(tz=_KST).date().isoformat()
 
 from src.config import Settings
 from src.logger import get_logger
@@ -120,8 +131,7 @@ class Database:
         self._update_daily_stats(pnl)
 
     def _update_daily_stats(self, pnl: float) -> None:
-        from datetime import date
-        today = date.today().isoformat()
+        today = _today_kst()
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO daily_stats(date, pnl, trades, wins, losses)
@@ -200,8 +210,7 @@ class Database:
             return [dict(r) for r in rows]
 
     def get_today_pnl(self) -> float:
-        from datetime import date
-        today = date.today().isoformat()
+        today = _today_kst()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT pnl FROM daily_stats WHERE date=?", (today,)
@@ -209,10 +218,12 @@ class Database:
             return float(row[0]) if row else 0.0
 
     def get_weekly_pnl(self) -> float:
+        # KST 기준 7일 전 날짜 계산 (SQLite date('now')는 UTC 기준이므로 직접 계산)
+        week_start = (datetime.now(tz=_KST) - timedelta(days=7)).date().isoformat()
         with self._conn() as conn:
             row = conn.execute(
-                """SELECT SUM(pnl) FROM daily_stats
-                   WHERE date >= date('now', '-7 days')"""
+                "SELECT SUM(pnl) FROM daily_stats WHERE date >= ?",
+                (week_start,),
             ).fetchone()
             return float(row[0] or 0)
 
@@ -235,10 +246,10 @@ class Database:
             return float(row[0] or 0)
 
     def get_trades_count_today(self) -> int:
-        from datetime import date
-        today_start = __import__("time").mktime(
-            date.today().timetuple()
-        )
+        # KST 기준 오늘 자정의 Unix timestamp
+        today_start = datetime.now(tz=_KST).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).timestamp()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM trades WHERE exit_ts >= ?", (today_start,)

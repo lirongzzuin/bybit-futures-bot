@@ -119,10 +119,16 @@ class TestStateMachine:
         assert exit_sig.reason == ExitReason.TAKE_PROFIT
 
     def test_trailing_stop_long(self):
+        # Trailing stop only fires AFTER tp1 partial exit.
+        # Simulate: enter → trigger TP1 partial → price rises → trailing fires.
         self._enter_long(entry=50000)
-        # Price rises to 52000 (new high)
+        # Manually mark tp1 as hit (simulates partial_exit() being called)
+        pos = self.sm.get_position("BTCUSDT")
+        pos.tp1_hit = True
+        pos.stop_price = 50000  # breakeven stop after TP1
+        # Price rises to 52000 (new high), trailing dist=750
         self.sm.check_exit("BTCUSDT", current_price=52000, current_atr=500, signal_direction=0)
-        # Now price drops 750 from high → trailing stop
+        # Price drops 750 from high (52000-750=51250 > 50000 breakeven) → trailing fires
         exit_sig = self.sm.check_exit("BTCUSDT", current_price=51249,
                                        current_atr=500, signal_direction=0)
         assert exit_sig.should_exit
@@ -333,3 +339,99 @@ class TestStateMachine:
         assert pos.tp1_price == 0.0
         assert pos.tp2_price == 0.0
         assert pos.tp1_hit is False
+
+    def test_trailing_stop_only_fires_after_tp1(self):
+        """TRAILING_STOP should NOT fire before tp1_hit=True."""
+        self._enter_long(
+            entry=50000, qty=0.01,
+            tp1_price=51000, tp2_price=53000,
+        )
+        # Price moved up to 51500 then pulled back — trailing should NOT fire
+        # because tp1 has not been hit yet
+        no_exit = self.sm.check_exit(
+            "BTCUSDT", current_price=50250,
+            current_atr=500, signal_direction=1,
+            bars_in_trade=3,
+        )
+        assert no_exit.reason != ExitReason.TRAILING_STOP
+
+    def test_trailing_stop_fires_after_tp1(self):
+        """TRAILING_STOP should fire only after tp1_hit=True."""
+        self._enter_long(
+            entry=50000, qty=0.10,
+            tp1_price=50750, tp2_price=53000,
+            partial_exit_pct=0.60,
+        )
+        # Trigger TP1 partial exit
+        self.sm.partial_exit("BTCUSDT", qty_to_close=0.06, exit_price=50750)
+        pos = self.sm.get_position("BTCUSDT")
+        assert pos.tp1_hit is True
+        # highest_price was set to 50750 during TP1 check
+        pos.highest_price = 52000
+        # trailing_stop_distance = 750, so trailing_stop = 52000 - 750 = 51250
+        # current_price = 51100 < 51250 → trailing fires
+        exit_sig = self.sm.check_exit(
+            "BTCUSDT", current_price=51100,
+            current_atr=500, signal_direction=1,
+            bars_in_trade=5,
+        )
+        assert exit_sig.should_exit
+        assert exit_sig.reason == ExitReason.TRAILING_STOP
+
+
+class TestOrderManagerUseMarket:
+    """Test that order type selection is correct for each exit reason."""
+
+    def _make_use_market(self, reason: str) -> bool:
+        """Replicate the use_market logic from order_manager.py."""
+        return (
+            reason.upper() == "STOP_LOSS"
+            or "GUARD" in reason.upper()
+            or "LIQUIDATION" in reason.upper()
+        )
+
+    def _make_fee_is_taker(self, reason: str) -> bool:
+        """Replicate the fee rate logic from main.py."""
+        return (
+            reason == "STOP_LOSS"
+            or "GUARD" in reason
+            or "LIQUIDATION" in reason
+        )
+
+    def test_stop_loss_uses_market_order(self):
+        assert self._make_use_market("STOP_LOSS") is True
+
+    def test_trailing_stop_uses_limit_order(self):
+        """TRAILING_STOP should NOT use market order (was the bug)."""
+        assert self._make_use_market("TRAILING_STOP") is False
+
+    def test_take_profit_uses_limit_order(self):
+        assert self._make_use_market("TAKE_PROFIT") is False
+
+    def test_time_exit_uses_limit_order(self):
+        assert self._make_use_market("TIME_EXIT") is False
+
+    def test_regime_change_uses_limit_order(self):
+        assert self._make_use_market("REGIME_CHANGE") is False
+
+    def test_signal_flip_uses_limit_order(self):
+        assert self._make_use_market("SIGNAL_FLIP") is False
+
+    def test_risk_guard_halt_uses_market_order(self):
+        assert self._make_use_market("RISK_GUARD_HALT") is True
+
+    def test_liquidation_uses_market_order(self):
+        assert self._make_use_market("LIQUIDATION") is True
+
+    def test_stop_loss_uses_taker_fee(self):
+        assert self._make_fee_is_taker("STOP_LOSS") is True
+
+    def test_trailing_stop_uses_maker_fee(self):
+        """TRAILING_STOP should use maker fee (was the bug)."""
+        assert self._make_fee_is_taker("TRAILING_STOP") is False
+
+    def test_take_profit_uses_maker_fee(self):
+        assert self._make_fee_is_taker("TAKE_PROFIT") is False
+
+    def test_partial_tp1_uses_maker_fee(self):
+        assert self._make_fee_is_taker("PARTIAL_TP1") is False

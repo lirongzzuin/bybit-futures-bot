@@ -16,7 +16,10 @@ from __future__ import annotations
 import signal
 import sys
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
+
+_KST = timezone(timedelta(hours=9))
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -81,6 +84,9 @@ class TradingBot:
         # Dashboard tracking
         self._start_ts: float = time.time()
         self._last_cycle_ts: float = 0.0
+
+        # Guard alert 디바운스: KST 날짜별로 한 번만 Slack 알림 전송
+        self._daily_loss_alert_sent_date: str = ""
 
         log.info(
             "TradingBot ready | mode=%s testnet=%s",
@@ -203,6 +209,18 @@ class TradingBot:
             log.warning("Guard HALT: %s — closing all positions", guard.reason)
             self._emergency_close_all(symbols=[symbol])
             return
+
+        # ── Daily loss limit Slack 알림 (하루 한 번, 최초 발동 시에만) ─────────
+        if guard.action == GuardAction.PAUSE and "Daily loss" in guard.reason:
+            today_kst = datetime.now(tz=_KST).date().isoformat()
+            if self._daily_loss_alert_sent_date != today_kst:
+                self._daily_loss_alert_sent_date = today_kst
+                # loss_pct 파싱: "Daily loss 8.33% ≥ limit 8.00%" → 0.0833
+                try:
+                    loss_pct = float(guard.reason.split("%")[0].split()[-1]) / 100
+                except Exception:
+                    loss_pct = settings.MAX_DAILY_LOSS_PCT
+                self._slack.send_daily_loss_limit(loss_pct)
 
         # ── Check existing position ───────────────────────────────────────────
         pos = self._state_machine.get_position(symbol)
@@ -375,7 +393,8 @@ class TradingBot:
             pnl = self._state_machine.partial_exit(symbol, qty_to_close, exit_price)
 
             notional = qty_to_close * exit_price
-            fee = notional * settings.BACKTEST_FEE_TAKER
+            # PARTIAL_TP1 closes with a limit order → maker fee
+            fee = notional * settings.BACKTEST_FEE_MAKER
 
             trade_id = self._db.get_state(f"trade_id:{symbol}")
             if trade_id:
@@ -401,6 +420,17 @@ class TradingBot:
                 symbol, qty_to_close, pnl,
             )
 
+            # Slack: 부분 청산(TP1) 알림
+            side_str = "Buy" if direction == 1 else "Sell"
+            pnl_pct = pnl / (pos.entry_price * qty_to_close) if pos.entry_price > 0 and qty_to_close > 0 else 0.0
+            self._slack.send_position_closed(
+                symbol=symbol,
+                side=side_str,
+                reason="PARTIAL_TP1",
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+            )
+
     def _execute_exit(self, symbol, pos, current_price, reason, snap) -> None:
         sym_info = self._client.get_symbol_info(symbol)
         direction = 1 if pos.is_long else -1
@@ -417,9 +447,16 @@ class TradingBot:
             exit_price = order.avg_price or current_price
             pnl = self._state_machine.exit(symbol, exit_price)
 
-            # Estimate fee
+            # Fee rate: STOP_LOSS/GUARD*/LIQUIDATION* → 시장가(Taker, 0.055%)
+            # TRAILING_STOP/TIME_EXIT/REGIME_CHANGE/SIGNAL_FLIP → 지정가(Maker, 0.020%)
+            # 주의: "STOP" substring은 "TRAILING_STOP"도 매칭되므로 exact match 사용
             notional = pos.qty * exit_price
-            fee = notional * settings.BACKTEST_FEE_TAKER
+            fee_rate = (
+                settings.BACKTEST_FEE_TAKER
+                if (reason == "STOP_LOSS" or "GUARD" in reason or "LIQUIDATION" in reason)
+                else settings.BACKTEST_FEE_MAKER
+            )
+            fee = notional * fee_rate
 
             trade_id = self._db.get_state(f"trade_id:{symbol}")
             if trade_id:
@@ -628,11 +665,11 @@ def main():
         id="universe_refresh",
     )
 
-    # Daily briefing: 9 AM KST
+    # Briefing: 09:00 KST 시작, 4시간 간격 (09, 13, 17, 21, 01, 05 KST)
     scheduler.add_job(
         bot._briefing.send,
-        CronTrigger(hour=settings.SLACK_DAILY_REPORT_HOUR, minute=0, timezone="Asia/Seoul"),
-        id="daily_briefing",
+        CronTrigger(hour="9,13,17,21,1,5", minute=0, timezone="Asia/Seoul"),
+        id="periodic_briefing",
     )
 
     # Real-time dashboard: every N minutes (0 = disabled)

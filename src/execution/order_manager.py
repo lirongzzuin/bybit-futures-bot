@@ -166,8 +166,14 @@ class OrderManager:
             log.warning("Duplicate exit order prevented for %s", symbol)
             return self._orders.get(client_id)
 
-        use_market = ("STOP" in reason.upper() or "GUARD" in reason.upper()
-                      or "LIQUIDATION" in reason.upper())
+        # STOP_LOSS, GUARD*, LIQUIDATION* → Market (즉각 실행 필요)
+        # TRAILING_STOP, TAKE_PROFIT, TIME_EXIT, REGIME_CHANGE, SIGNAL_FLIP → Limit (Maker fee)
+        # 주의: "STOP" substring 체크는 "TRAILING_STOP"도 잡아버리므로 exact match 사용
+        use_market = (
+            reason.upper() == "STOP_LOSS"
+            or "GUARD" in reason.upper()
+            or "LIQUIDATION" in reason.upper()
+        )
 
         # In hedge mode, closing a long uses positionIdx=1, closing a short uses positionIdx=2
         # (same as opening — the positionIdx selects WHICH position to reduce, not direction)
@@ -415,11 +421,50 @@ class OrderManager:
         risk_params: RiskParameters,
         symbol_info: dict,
     ) -> None:
-        """Optionally attach stop-loss / take-profit to the filled position."""
-        if self._s.is_dry_run() or not managed.exchange_id:
+        """
+        Attach exchange-side SL/TP to the filled position via trading-stop API.
+        This ensures positions are protected even if the bot crashes or loses
+        connectivity — the exchange will enforce the stop independently.
+
+        Order type policy:
+          SL → Market: 손절은 즉각 실행이 최우선 (Taker fee 감수)
+          TP → Limit at TP2: 봇이 TP1 부분청산을 처리하도록 TP2를 전체 청산 가격으로 설정
+                             지정가(Maker fee)로 체결 → 수수료 절약
+                             TP1은 봇 5분 사이클에서 처리 (부분 청산)
+        """
+        if self._s.is_dry_run():
             return
-        # SL/TP are set at order placement level (via place_order params)
-        # This is a placeholder for post-fill adjustment if needed
+
+        if risk_params.stop_price <= 0:
+            log.warning("_set_sl_tp: invalid stop_price for %s — skipping", managed.symbol)
+            return
+
+        sl_price = self._client.round_price(risk_params.stop_price, symbol_info)
+
+        # 거래소 예약 TP는 TP2(최종 목표가)로 설정
+        # - TP1 부분청산은 봇 5분 사이클에서 처리
+        # - 거래소 TP가 TP1이면: 거래소가 전량 시장가 청산 → 부분청산 로직 불가
+        # - 거래소 TP가 TP2이면: 봇이 TP1 처리 후 잔여를 TP2까지 홀딩 → 정상
+        tp2 = risk_params.tp2_price if risk_params.tp2_price > 0 else risk_params.take_profit_price
+        tp_price = self._client.round_price(tp2, symbol_info) if tp2 > 0 else None
+
+        try:
+            self._client.set_trading_stop(
+                symbol=managed.symbol,
+                stop_loss=sl_price,
+                take_profit=tp_price,
+                position_idx=managed.position_idx,
+                sl_order_type="Market",   # SL: 시장가 (긴급)
+                tp_order_type="Limit",    # TP: 지정가 (Maker fee)
+                tp_limit_price=tp_price,  # 트리거가격 = 지정가격 (TP2에서 바로 체결)
+            )
+            log.info(
+                "Exchange SL/TP set | %s sl=%s(Market) tp=%s(Limit@TP2) posIdx=%d",
+                managed.symbol, sl_price, tp_price, managed.position_idx,
+            )
+        except Exception as e:
+            # Never block a trade over SL/TP attachment failure — log and continue
+            log.error("Failed to set exchange SL/TP for %s: %s", managed.symbol, e)
 
     # ── Client Order ID ───────────────────────────────────────────────────────
 
