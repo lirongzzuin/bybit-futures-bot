@@ -91,10 +91,10 @@ class TestRiskEngine:
         assert result.position_size_usdt > 0
 
     def test_max_loss_bounded(self):
-        """1-trade max loss should be ≤ risk_pct of equity."""
-        result = self._calc(equity=10000.0)
-        # Max loss should be ≤ 1% of equity + small buffer for rounding
-        assert result.max_loss_usdt <= 10000.0 * 0.015  # 1% + 50% buffer
+        """일반 시그널(0.7)에서 max_loss ≤ equity × 5% (max_notional clamp 효과)."""
+        result = self._calc(equity=10000.0, signal_strength=0.70)
+        # trade_risk=2.5% but notional clamp → actual max_loss < 5% of equity
+        assert result.max_loss_usdt <= 10000.0 * 0.05
 
     def test_leverage_within_caps(self):
         result = self._calc()
@@ -142,9 +142,15 @@ class TestRiskEngine:
         if result.risk_ok:
             assert result.position_size_usdt >= SYMBOL_INFO["min_notional"]
 
-    def test_drawdown_hard_cap_at_15_pct(self):
+    def test_drawdown_hard_cap_proportional(self):
+        """DD >12%: cap = max(10, cap//2). 테스트 cap=10 → min(10,max(10,5))=10."""
         result = self._calc(drawdown_pct=0.16)
         assert result.leverage <= 10  # MAX_LEVERAGE_CAP=10이므로 ≤10
+
+    def test_high_dd_further_reduces_cap(self):
+        """DD >20%: cap = max(5, cap//4). 테스트 cap=10 → max(5,2)=5."""
+        result = self._calc(drawdown_pct=0.25, signal_strength=0.85)
+        assert result.leverage <= 5
 
     def test_consecutive_losses_reduce_leverage(self):
         no_loss = self._calc(consecutive_losses=0)
@@ -323,6 +329,93 @@ class TestRiskEngine:
         assert normal.risk_ok and with_kelly.risk_ok
         # Kelly result should have kelly_size > 0
         assert with_kelly.kelly_size >= 0.0
+
+
+class TestHighLeverageMode:
+    """시그널 강도 기반 50× 레버리지 달성 테스트."""
+
+    def _make_engine(self, max_lev=50, bear_max_lev=50):
+        s = make_settings(
+            MAX_LEVERAGE_CAP=max_lev,
+            BEAR_MAX_LEVERAGE_CAP=bear_max_lev,
+            MAX_RISK_PER_TRADE_PCT=0.015,  # 1.5% base
+            SCALP_STOP_ATR=1.5,
+            SCALP_TP1_ATR=2.5,
+            SCALP_TP2_ATR=5.0,
+        )
+        return RiskEngine(s)
+
+    def _calc(self, engine, **kwargs):
+        defaults = dict(
+            equity=10000.0,
+            entry_price=50000.0,
+            side="Buy",
+            atr=250.0,          # ATR = 0.5% (BTC 15M 전형적)
+            signal_strength=0.85,
+            spread_pct=0.0005,
+            funding_rate=0.0001,
+            vol_percentile=0.3,
+            drawdown_pct=0.0,
+            consecutive_losses=0,
+            symbol_max_leverage=100,
+            symbol_info=SYMBOL_INFO,
+            current_positions=0,
+            bear_mode=True,
+        )
+        defaults.update(kwargs)
+        return engine.calculate(**defaults)
+
+    def test_ultra_high_signal_achieves_50x(self):
+        """시그널 0.85 + BEAR 모드 + ATR 0.5% → 50× 달성."""
+        engine = self._make_engine()
+        result = self._calc(engine, signal_strength=0.90)
+        assert result.risk_ok, result.reason
+        # base_lev = 10% / (1.5 × 0.5% × 0.25) = 10% / 0.1875% = 53.3× → cap 50×
+        assert result.leverage >= 40, f"Expected ≥40×, got {result.leverage}×"
+
+    def test_signal_tiers_ascending_leverage(self):
+        """시그널 강도 증가 → 레버리지 단조 증가."""
+        engine = self._make_engine()
+        levs = {}
+        for s in [0.50, 0.65, 0.75, 0.80, 0.85]:
+            r = self._calc(engine, signal_strength=s)
+            levs[s] = r.leverage if r.risk_ok else 0
+        assert levs[0.65] >= levs[0.50]
+        assert levs[0.75] >= levs[0.65]
+        assert levs[0.85] >= levs[0.75]
+
+    def test_tight_stop_produces_good_rr(self):
+        """strength=0.85: 타이트 스탑(0.35×ATR) + 정상 TP(2.5×ATR) → R:R ≥ 4."""
+        engine = self._make_engine()
+        entry = 50000.0
+        atr = 250.0   # 0.5% of price
+        result = self._calc(engine, signal_strength=0.85, side="Buy",
+                            entry_price=entry, atr=atr)
+        stop_dist = entry - result.stop_price   # entry - stop
+        tp1_dist = result.tp1_price - entry
+        rr = tp1_dist / stop_dist if stop_dist > 0 else 0
+        # stop = 0.35×1.5×250=131.25, TP1 = 2.5×250=625 → R:R = 625/131.25 = 4.76
+        assert rr >= 4.0, f"R:R too low: {rr:.2f}"
+
+    def test_low_signal_stays_conservative(self):
+        """약한 시그널(0.55)은 낮은 레버리지 유지."""
+        engine = self._make_engine()
+        result = self._calc(engine, signal_strength=0.55, bear_mode=False)
+        # stop_scale=1.0, trade_risk=1.5%, ATR=0.5% → base_lev = 1.5%/0.75% = 2×
+        assert result.leverage <= 5, f"Expected ≤5×, got {result.leverage}×"
+
+    def test_bull_mode_also_caps_at_50x(self):
+        """BULL 모드도 MAX_LEVERAGE_CAP=50 설정 시 50× 가능."""
+        engine = self._make_engine(max_lev=50)
+        result = self._calc(engine, signal_strength=0.90, bear_mode=False)
+        assert result.risk_ok
+        assert result.leverage <= 50
+
+    def test_liquidation_buffer_passes_at_50x(self):
+        """50× 레버리지: liq_dist >> 3×stop_dist (청산 거리 충분)."""
+        engine = self._make_engine()
+        result = self._calc(engine, signal_strength=0.90)
+        assert result.risk_ok, f"Liquidation check failed: {result.reason}"
 
 
 class TestFeeBreakevenCheck:

@@ -103,26 +103,47 @@ class RiskEngine:
             partial_exit_pct = self._s.SCALP_PARTIAL_EXIT_PCT
             mode_max_bars = self._s.SCALP_MAX_BARS
 
-        # ── Step 1: Stop distance ────────────────────────────────────────────
-        stop_distance = atr * stop_atr_mult
+        # ── Signal-driven leverage escalation ─────────────────────────────────
+        # 핵심 원리: base_leverage = trade_risk_pct / stop_distance_pct
+        #   → 강한 시그널: 타이트 스탑(stop_atr_scale↓) + 높은 리스크%(trade_risk↑)
+        #   → 두 효과가 곱해져 50× 레버리지 자연 달성
+        #
+        # 예시 (BTC, ATR=0.5%, SCALP_STOP=1.5×):
+        #   strength=0.85: stop=0.25×1.5×0.5%=0.1875%, risk=10% → lev=10%/0.1875%=53× ✓
+        #   strength=0.80: stop=0.40×1.5×0.5%=0.3000%, risk= 6% → lev= 6%/0.3000%=20×
+        #   strength=0.75: stop=0.60×1.5×0.5%=0.4500%, risk= 3% → lev= 3%/0.4500%= 7×
+        #   strength=0.65: stop=0.80×1.5×0.5%=0.6000%, risk=2.5%→ lev=2.5%/0.6000%= 4×
+        #   default:       stop=1.00×1.5×0.5%=0.7500%, risk=1.5%→ lev=1.5%/0.7500%= 2×
+        target_risk = self._s.MAX_RISK_PER_TRADE_PCT
+        if signal_strength >= 0.85:
+            stop_atr_scale = 0.35           # 타이트하되 노이즈 고려 (0.25→0.35)
+            trade_risk_pct = min(0.13, target_risk * 9.0)   # 최대 13%
+        elif signal_strength >= 0.80:
+            stop_atr_scale = 0.50
+            trade_risk_pct = min(0.07, target_risk * 5.0)   # 최대 7%
+        elif signal_strength >= 0.75:
+            stop_atr_scale = 0.65
+            trade_risk_pct = min(0.035, target_risk * 2.3)  # 최대 3.5%
+        elif signal_strength >= 0.65:
+            stop_atr_scale = 0.85
+            trade_risk_pct = min(0.025, target_risk * 1.7)  # 최대 2.5%
+        else:
+            stop_atr_scale = 1.00
+            trade_risk_pct = target_risk                     # 기본값
+
+        # ── Step 1: Stop distance (signal-scaled) ─────────────────────────────
+        # TP prices는 FULL ATR 배수 사용 → tight stop + large TP = 우수한 R:R
+        # 예: strength=0.85 → stop=0.375× ATR, TP1=2.5× ATR → R:R = 6.7:1
+        stop_distance = atr * stop_atr_mult * stop_atr_scale
         stop_distance_pct = stop_distance / entry_price
 
         if stop_distance_pct <= 0:
             return self._no_trade("Stop distance zero")
 
-        # ── Step 2: Base leverage from volatility targeting ───────────────────
-        # Target: equity × risk_pct = loss if stop is hit
-        # qty = equity × risk_pct / stop_distance
-        # notional = qty × price
-        # leverage = notional / margin = qty × price / (qty × price / leverage) → solve:
-        # leverage = notional / (equity × risk_pct / stop_distance_pct)
-        # → leverage = 1 / stop_distance_pct × (we scale later)
-        #
-        # Simpler: base_leverage = target_risk_pct / stop_distance_pct
-        # This ensures 1 stop-hit = target_risk_pct of equity lost (at 1× leverage)
-        # Then position_size = equity × risk_pct / (price × stop_distance_pct)
-        target_risk = self._s.MAX_RISK_PER_TRADE_PCT
-        base_leverage = target_risk / stop_distance_pct
+        # ── Step 2: Base leverage ─────────────────────────────────────────────
+        # leverage = trade_risk_pct / stop_distance_pct
+        # → 강한 시그널: 높은 trade_risk + 타이트 스탑 → 50× 자연 달성
+        base_leverage = trade_risk_pct / stop_distance_pct
         base_leverage = max(1.0, base_leverage)
 
         # ── Step 3: Dampening factors ─────────────────────────────────────────
@@ -156,18 +177,10 @@ class RiskEngine:
         else:
             fund_mod = 1.00
 
-        # (d) Signal strength — 강한 시그널 = 레버리지 적극 활용
-        # 0.85+: +50% boost, 0.75: +25%, 0.65: neutral, 0.55: -20%, <0.55: -40%
-        if signal_strength >= 0.85:
-            sig_mod = 1.50
-        elif signal_strength >= 0.75:
-            sig_mod = 1.25
-        elif signal_strength >= 0.65:
-            sig_mod = 1.00
-        elif signal_strength >= 0.55:
-            sig_mod = 0.80
-        else:
-            sig_mod = 0.60
+        # (d) Signal quality gate — 약한 시그널 약간 감쇠, 강한 시그널 boost 없음
+        # (주요 레버리지 제어는 risk_escalation이 담당, sig_mod는 보조)
+        sig_mod = 0.65 + 0.35 * min(signal_strength, 1.0)
+        # 0.55→0.84, 0.65→0.88, 0.75→0.91, 0.85→0.95, 1.0→1.00
 
         # (e) Account health (drawdown + consecutive losses)
         dd_mod = max(0.25, 1.0 - drawdown_pct * 3.0)
@@ -197,10 +210,9 @@ class RiskEngine:
         ))
 
         # ── Step 5: Position sizing ───────────────────────────────────────────
-        # We want: loss if stop hit = equity × risk_pct
-        # qty × stop_distance = equity × risk_pct
-        # qty = equity × risk_pct / stop_distance (in base units)
-        qty_base = equity * target_risk / stop_distance
+        # qty × stop_distance = equity × trade_risk_pct
+        # → 강한 시그널: 더 많은 자본 배분, 하지만 max_notional이 실제 손실 제한
+        qty_base = equity * trade_risk_pct / stop_distance
 
         # ── AQR Volatility Targeting (Moreira & Muir 2017) ────────────────────
         # Scale position so daily P&L vol ≈ VOLATILITY_TARGET_PCT / sqrt(252)
@@ -287,11 +299,14 @@ class RiskEngine:
             liq_price = entry_price * (1.0 + 1.0 / final_leverage - maintenance_margin_rate)
             liq_distance = liq_price - entry_price
 
-        min_liq_buffer = stop_distance * 3.0
+        # 고배율(≥25×): 1.5× 버퍼 허용 (타이트 스탑 + 넓은 TP R:R 설계)
+        # 저배율(<25×): 3× 버퍼 유지 (안전 우선)
+        liq_buffer_mult = 1.5 if final_leverage >= 25 else 3.0
+        min_liq_buffer = stop_distance * liq_buffer_mult
         if liq_distance < min_liq_buffer:
             return self._no_trade(
                 f"Liquidation too close: liq_dist={liq_distance:.4f} "
-                f"< 3×stop={min_liq_buffer:.4f} (lev={final_leverage}× liq={liq_price:.4f})"
+                f"< {liq_buffer_mult}×stop={min_liq_buffer:.4f} (lev={final_leverage}× liq={liq_price:.4f})"
             )
 
         log.debug(

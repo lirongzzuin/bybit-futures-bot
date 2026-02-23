@@ -490,9 +490,8 @@ class BybitClient:
         position_idx: int = 0,
         sl_trigger_by: str = "LastPrice",
         tp_trigger_by: str = "LastPrice",
-        sl_order_type: str = "Market",   # SL: 시장가 (긴급 즉시 실행)
-        tp_order_type: str = "Limit",    # TP: 지정가 (Maker fee 절약)
-        tp_limit_price: Optional[str] = None,  # tpOrderType=Limit 시 필수
+        sl_order_type: str = "Market",
+        tp_order_type: str = "Market",   # tpSlMode=Full 시 반드시 Market (Bybit 10001 오류 방지)
     ) -> Dict:
         """
         Set SL/TP on an open position via Bybit trading-stop API.
@@ -500,8 +499,10 @@ class BybitClient:
         position_idx: 0=One-Way, 1=Hedge Long, 2=Hedge Short
 
         Order type policy:
-          SL → Market (slOrderType="Market"): 손절은 즉각 실행이 최우선
-          TP → Limit  (tpOrderType="Limit"):  익절은 지정가로 Maker fee 절약
+          SL → Market: 손절은 즉각 실행이 최우선 (Taker fee 감수)
+          TP → Market: tpSlMode=Full 시 Bybit API 요구사항 (Limit 불가 → 10001 오류)
+                       TP1 부분청산은 봇의 5분 사이클에서 처리
+                       거래소 TP(Market)는 봇 크래시 시 최후 안전망
         """
         params: Dict[str, Any] = dict(
             category="linear",
@@ -516,13 +517,11 @@ class BybitClient:
         if take_profit:
             params["takeProfit"] = take_profit
             params["tpTriggerBy"] = tp_trigger_by
-            params["tpOrderType"] = tp_order_type
-            if tp_order_type == "Limit" and tp_limit_price:
-                params["tpLimitPrice"] = tp_limit_price
+            params["tpOrderType"] = tp_order_type   # "Market" — tpSlMode=Full 요구사항
         result = self._call("set_trading_stop", **params)
         log.info(
-            "TradingStop set | %s posIdx=%d sl=%s(Market) tp=%s(%s)",
-            symbol, position_idx, stop_loss, take_profit, tp_order_type,
+            "TradingStop set | %s posIdx=%d sl=%s(Market) tp=%s(Market)",
+            symbol, position_idx, stop_loss, take_profit,
         )
         return result
 

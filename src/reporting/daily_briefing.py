@@ -2,9 +2,21 @@
 Daily Briefing Generator.
 Called by the scheduler at 9:00 AM and 9:00 PM KST.
 
-period_pnl: 마지막 브리핑 이후 발생한 수익/손실
-  - 브리핑마다 스냅샷을 찍고, 다음 브리핑 때 차이를 계산
-  - 재시작 후에는 DB에 저장된 스냅샷 기준으로 복원
+PnL 기준점 시스템:
+  _PNL_BASELINE_KEY  : 누적 수익 기준 equity (reset_pnl_baseline() 로 재설정)
+  _SNAPSHOT_KEY      : 마지막 브리핑 equity (브리핑마다 자동 갱신 → 기간 PnL)
+
+reset_pnl_baseline() 호출 방법:
+  fly ssh console --app bybit-futures-bot
+  → python3 -c "
+      from src.config import settings; from src.db.database import Database
+      from src.api.bybit_client import BybitClient
+      db=Database(settings); client=BybitClient(settings)
+      eq=client.get_usdt_equity()
+      db.set_state('pnl_total_baseline', str(eq))
+      db.set_state('briefing_equity_snapshot', str(eq))
+      print(f'Baseline reset to {eq:.2f} USDT')
+    "
 """
 from __future__ import annotations
 
@@ -21,7 +33,8 @@ from src.logger import get_logger
 log = get_logger(__name__)
 
 _KST = timezone(timedelta(hours=9))
-_SNAPSHOT_KEY = "briefing_equity_snapshot"
+_PNL_BASELINE_KEY = "pnl_total_baseline"    # 누적 PnL 기준점 (수동 재설정)
+_SNAPSHOT_KEY = "briefing_equity_snapshot"  # 기간 PnL 기준점 (브리핑마다 갱신)
 
 
 class DailyBriefing:
@@ -38,92 +51,104 @@ class DailyBriefing:
         self._db = db
         self._slack = slack
         self._sm = state_machine
-        # 마지막 브리핑 시 equity 스냅샷 (재시작 시 DB에서 복원)
         self._last_equity: float = 0.0
+
+    def reset_pnl_baseline(self) -> float:
+        """
+        누적 PnL + 기간 PnL 기준점을 현재 equity로 초기화.
+        main.py 에서 또는 fly SSH 콘솔에서 직접 호출 가능.
+        """
+        current_equity = self._get_equity()
+        self._db.set_state(_PNL_BASELINE_KEY, str(current_equity))
+        self._db.set_state(_SNAPSHOT_KEY, str(current_equity))
+        self._last_equity = current_equity
+        log.info("PnL baseline reset to %.2f USDT", current_equity)
+        return current_equity
 
     def send(self) -> None:
         """Compile and send briefing to Slack."""
         try:
             report = self._build_report()
             self._slack.send_daily_briefing(report)
-            # 이번 브리핑 시 equity를 스냅샷으로 저장 (다음 브리핑의 기준점)
+            # 이번 브리핑 equity를 스냅샷으로 저장 (다음 브리핑 기간 PnL 계산용)
             self._last_equity = report["equity"]
             self._db.set_state(_SNAPSHOT_KEY, str(self._last_equity))
-            log.info("Daily briefing sent | snapshot equity=%.2f", self._last_equity)
+            log.info("Daily briefing sent | snapshot=%.2f", self._last_equity)
         except Exception as e:
             log.error("Daily briefing failed: %s", e)
             self._slack.send_error(str(e), context="daily_briefing")
 
-    def _get_last_equity_snapshot(self) -> float:
-        """DB에서 마지막 브리핑 equity 스냅샷을 복원한다."""
-        if self._last_equity > 0:
-            return self._last_equity
-        try:
-            val = self._db.get_state(_SNAPSHOT_KEY)
-            if val:
-                self._last_equity = float(val)
-                return self._last_equity
-        except Exception:
-            pass
-        return 0.0
-
     def _build_report(self) -> Dict[str, Any]:
         now_kst = datetime.now(tz=_KST)
-        # 브리핑 세션 이름: 09시 = "오전 브리핑", 21시 = "오후 브리핑"
         session = "오전 브리핑" if now_kst.hour < 15 else "오후 브리핑"
-
-        # Equity
         equity = self._get_equity()
-        total_pnl = self._db.get_total_pnl(mode=self._s.TRADING_MODE)
-        initial = self._s.PAPER_CAPITAL_USDT
-        total_pct = total_pnl / initial if initial > 0 else 0
 
-        # 기간 PnL: 마지막 브리핑 이후 수익 (스냅샷 기준)
-        last_snap = self._get_last_equity_snapshot()
+        # ── 누적 PnL (baseline 기준) ──────────────────────────────────────────
+        baseline_raw = self._db.get_state(_PNL_BASELINE_KEY)
+        if baseline_raw:
+            baseline = float(baseline_raw)
+        else:
+            # 최초 실행: PAPER_CAPITAL_USDT를 baseline으로 사용
+            baseline = self._s.PAPER_CAPITAL_USDT
+        total_pnl = equity - baseline
+        total_pct = total_pnl / baseline if baseline > 0 else 0.0
+
+        # ── 기간 PnL (마지막 브리핑 이후) ─────────────────────────────────────
+        snap_raw = self._db.get_state(_SNAPSHOT_KEY)
+        if self._last_equity > 0:
+            last_snap = self._last_equity
+        elif snap_raw:
+            last_snap = float(snap_raw)
+            self._last_equity = last_snap
+        else:
+            last_snap = 0.0
+
         if last_snap > 0:
             period_pnl = equity - last_snap
-            period_pct = period_pnl / last_snap if last_snap > 0 else 0.0
+            period_pct = period_pnl / last_snap
         else:
-            # 첫 브리핑: 오늘 PnL을 period로 사용
             period_pnl = self._db.get_today_pnl()
-            period_pct = period_pnl / (equity - period_pnl) if (equity - period_pnl) > 0 else 0.0
+            period_pct = period_pnl / max(equity - period_pnl, 1.0)
 
-        # Drawdown
+        # ── Drawdown ──────────────────────────────────────────────────────────
         peak = self._db.get_peak_equity(mode=self._s.TRADING_MODE)
-        drawdown = (peak - equity) / peak if peak > 0 else 0
+        if not peak or peak < equity:
+            peak = equity  # 새 고점
+        drawdown = (peak - equity) / peak if peak > 0 else 0.0
 
-        # Daily stats (오늘 거래 횟수)
+        # ── Daily stats ───────────────────────────────────────────────────────
         daily_stats = self._db.get_daily_stats(days=1)
         trades_today = daily_stats[0].get("trades", 0) if daily_stats else 0
 
-        # 최근 100개 거래 승률
         recent_trades = self._db.get_trades(limit=100, mode=self._s.TRADING_MODE)
         wins = sum(1 for t in recent_trades if float(t.get("pnl", 0)) > 0)
-        win_rate = wins / len(recent_trades) if recent_trades else 0
+        win_rate = wins / len(recent_trades) if recent_trades else 0.0
 
-        # Open positions
+        # ── Open positions ────────────────────────────────────────────────────
         open_positions = self._sm.all_positions()
-        pos_list = []
+        pos_list: List[Dict] = []
         total_lev = 0
-        total_exposure = 0
+        total_exposure = 0.0
         for p in open_positions:
             pos_list.append({
                 "symbol": p.symbol,
                 "side": p.state.value,
                 "size": round(p.qty, 4),
                 "unrealised_pnl": round(p.unrealised_pnl, 2),
+                "leverage": p.leverage,
             })
             total_lev += p.leverage
             total_exposure += p.qty * p.entry_price
 
-        avg_lev = total_lev / len(open_positions) if open_positions else 0
-        exposure_pct = total_exposure / equity if equity > 0 else 0
+        avg_lev = total_lev / len(open_positions) if open_positions else 0.0
+        exposure_pct = total_exposure / equity if equity > 0 else 0.0
 
         return {
             "session": session,
             "date": now_kst.strftime("%Y-%m-%d"),
             "time": now_kst.strftime("%H:%M KST"),
             "equity": equity,
+            "baseline": baseline,
             "period_pnl": period_pnl,
             "period_pct": period_pct,
             "total_pnl": total_pnl,

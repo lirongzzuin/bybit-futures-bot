@@ -237,20 +237,36 @@ class OrderManager:
             return True
         except BybitAPIError as e:
             if e.code == 110072:
-                # Market order with this linkId already exists — treat as success
-                log.info(
-                    "Market order %s already placed (110072) — treating as filled",
-                    managed.client_id,
-                )
+                # 동일 linkId 주문이 이미 존재 — 실제 체결 여부 검증 필수
+                # ※ GTC 주문이 취소된 후 Market 폴백 시에도 110072 발생 가능
+                #   이 경우 취소된 주문을 체결로 오판하면 '유령 포지션' 발생!
                 existing = self._client.get_order_by_link_id(
                     managed.symbol, managed.client_id
                 )
                 if existing:
-                    managed.exchange_id = existing.get("orderId")
-                managed.status = OrderStatus.FILLED
-                managed.avg_price = current_price
-                managed.price = str(current_price)
-                return True
+                    order_status = existing.get("orderStatus", "")
+                    if order_status == "Filled":
+                        log.info(
+                            "Market order %s already filled (110072) — treating as success",
+                            managed.client_id,
+                        )
+                        managed.exchange_id = existing.get("orderId")
+                        managed.status = OrderStatus.FILLED
+                        managed.avg_price = float(existing.get("avgPrice", current_price) or current_price)
+                        managed.price = str(managed.avg_price)
+                        return True
+                    else:
+                        # 취소/거부된 이전 주문과 linkId 충돌 — 유령 포지션 방지
+                        log.warning(
+                            "Order %s exists with status=%s (not Filled) — NOT treating as position open",
+                            managed.client_id, order_status,
+                        )
+                        managed.status = OrderStatus.FAILED
+                        return False
+                else:
+                    log.warning("110072 but no existing order found for %s — FAILED", managed.client_id)
+                    managed.status = OrderStatus.FAILED
+                    return False
             if e.code == 110017 and is_close:
                 # "current position is zero" — position already closed/liquidated on exchange.
                 # Treat as success so the state machine can move to FLAT.
@@ -313,7 +329,10 @@ class OrderManager:
                     qty=managed.qty,
                     order_type="Limit",
                     price=price_str,
-                    time_in_force="PostOnly",
+                    time_in_force="GTC",  # PostOnly 대신 GTC: 즉시 체결 허용(Taker 포함)
+                    # PostOnly는 즉시 체결 시 거부 → Cancelled → 동일 client_id로 Market 시도
+                    # → 110072 오류 → 취소된 주문을 체결로 오판 → 유령 포지션 발생
+                    # GTC는 항상 체결됨(메이커 or 테이커), 폴백 시 새 client_id 사용
                     client_order_id=managed.client_id,
                     position_idx=managed.position_idx,
                 )
@@ -342,6 +361,9 @@ class OrderManager:
                         )
                         if attempt == max_retries:
                             log.info("Falling back to market order for %s", managed.symbol)
+                            managed.client_id = self._make_client_id(
+                                managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                            )
                             return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                         continue
                 elif e.code == 110017 and is_close:
@@ -357,8 +379,10 @@ class OrderManager:
                 else:
                     log.warning("Limit order attempt %d failed: %s", attempt, e)
                     if attempt == max_retries:
-                        # Fallback to market
                         log.info("Falling back to market order for %s", managed.symbol)
+                        managed.client_id = self._make_client_id(
+                            managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                        )
                         return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                     continue
 
@@ -379,6 +403,10 @@ class OrderManager:
                     pass
 
             if attempt == max_retries:
+                # Market fallback: 새 client_id 생성하여 GTC 취소된 ID 재사용 방지
+                managed.client_id = self._make_client_id(
+                    managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                )
                 return self._place_market(managed, current_price, symbol_info, is_close=is_close)
 
         return False
@@ -426,11 +454,11 @@ class OrderManager:
         This ensures positions are protected even if the bot crashes or loses
         connectivity — the exchange will enforce the stop independently.
 
-        Order type policy:
-          SL → Market: 손절은 즉각 실행이 최우선 (Taker fee 감수)
-          TP → Limit at TP2: 봇이 TP1 부분청산을 처리하도록 TP2를 전체 청산 가격으로 설정
-                             지정가(Maker fee)로 체결 → 수수료 절약
-                             TP1은 봇 5분 사이클에서 처리 (부분 청산)
+        Order type policy (tpSlMode=Full):
+          SL → Market: 손절은 즉각 실행이 최우선
+          TP → Market: tpSlMode=Full 시 Bybit API 요구사항 (Limit 사용 시 10001 오류)
+          TP2를 거래소 TP로 설정 — 봇이 TP1 부분청산을 먼저 처리하고,
+          봇 크래시 시 거래소 TP(Market)가 최후 안전망 역할
         """
         if self._s.is_dry_run():
             return
@@ -441,10 +469,7 @@ class OrderManager:
 
         sl_price = self._client.round_price(risk_params.stop_price, symbol_info)
 
-        # 거래소 예약 TP는 TP2(최종 목표가)로 설정
-        # - TP1 부분청산은 봇 5분 사이클에서 처리
-        # - 거래소 TP가 TP1이면: 거래소가 전량 시장가 청산 → 부분청산 로직 불가
-        # - 거래소 TP가 TP2이면: 봇이 TP1 처리 후 잔여를 TP2까지 홀딩 → 정상
+        # 거래소 TP는 TP2(최종 목표가)로 설정 — TP1 부분청산은 봇 5분 사이클에서 처리
         tp2 = risk_params.tp2_price if risk_params.tp2_price > 0 else risk_params.take_profit_price
         tp_price = self._client.round_price(tp2, symbol_info) if tp2 > 0 else None
 
@@ -455,11 +480,10 @@ class OrderManager:
                 take_profit=tp_price,
                 position_idx=managed.position_idx,
                 sl_order_type="Market",   # SL: 시장가 (긴급)
-                tp_order_type="Limit",    # TP: 지정가 (Maker fee)
-                tp_limit_price=tp_price,  # 트리거가격 = 지정가격 (TP2에서 바로 체결)
+                tp_order_type="Market",   # TP: 시장가 (tpSlMode=Full 요구사항)
             )
             log.info(
-                "Exchange SL/TP set | %s sl=%s(Market) tp=%s(Limit@TP2) posIdx=%d",
+                "Exchange SL/TP set | %s sl=%s(Mkt) tp=%s(Mkt@TP2) posIdx=%d",
                 managed.symbol, sl_price, tp_price, managed.position_idx,
             )
         except Exception as e:

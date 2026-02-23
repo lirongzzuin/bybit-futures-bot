@@ -124,7 +124,22 @@ class ProfitProtector:
     def _calculate_transfer(self, equity: float) -> Optional[float]:
         """
         Returns how much to transfer, or None if conditions not met.
+
+        복리 성장 전략:
+          - 계좌가 PROFIT_PROTECT_MIN_EQUITY_USDT($1000) 미만이면 이체 건너뜀
+          - $170 → $1000 구간은 100% 복리 재투자 (이체 없음)
+          - $1000 초과 시 수익의 50%를 Funding Account로 이체 (리스크 관리)
         """
+        # ── 최소 계좌 잔고 체크: 복리 성장 단계 ──────────────────────────────
+        min_equity = self._s.PROFIT_PROTECT_MIN_EQUITY_USDT
+        if equity < min_equity:
+            log.debug(
+                "ProfitProtector: equity=%.2f < min_threshold=%.2f — 복리 성장 단계, 이체 건너뜀",
+                equity,
+                min_equity,
+            )
+            return None
+
         profit = equity - self._initial_capital
         profit_pct = profit / self._initial_capital if self._initial_capital > 0 else 0
 

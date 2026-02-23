@@ -1,15 +1,14 @@
 """
-Hard Guard Rails — enforces loss limits and halts trading automatically.
+Hard Guard Rails — enforces hard limits and halts trading in critical scenarios.
 
 Guards checked in order:
-  1. Daily loss limit
-  2. Weekly loss limit
-  3. Max drawdown
-  4. Spike / extreme volatility
-  5. Exposure limits
+  1. Daily loss monitoring (알림만, 거래 중지 없음 — 복리 극대화)
+  2. Weekly loss monitoring (알림만, 거래 중지 없음)
+  3. Max drawdown (30% 초과 시 HALT — 파산 방어)
+  4. Spike / extreme volatility (스프레드 > 1% 시 진입 일시 중지)
 
 When a guard trips, it either:
-  - Halts new entries (PAUSE mode)
+  - Logs a warning + Slack alert (daily/weekly loss → 거래 계속)
   - Forces position reduction (REDUCE mode)
   - Emergency-exits all positions (HALT mode)
 """
@@ -77,14 +76,20 @@ class RiskGuards:
     def _check_daily_loss(
         self, equity: float, daily_pnl: float, initial_capital: float
     ) -> GuardResult:
-        """Stop new entries if daily loss exceeds limit."""
+        """일일 손실 모니터링 — 거래 중지 없이 경고만 (복리 극대화 전략).
+
+        경고는 caller(main.py)에서 Slack으로 전송하고 거래는 계속 진행.
+        단, equity <= 0이면 즉시 HALT.
+        """
         if equity <= 0:
             return GuardResult(GuardAction.HALT, "Equity <= 0")
 
         daily_loss_pct = -daily_pnl / max(equity - daily_pnl, 1)
         if daily_loss_pct >= self._s.MAX_DAILY_LOSS_PCT:
+            # 거래 중지하지 않음 — main.py에서 Slack 알림 한 번만 전송 (KST 날짜 디바운스)
+            # log.warning은 심볼당 10회 스팸 방지를 위해 여기서 출력 안 함
             return GuardResult(
-                GuardAction.PAUSE,
+                GuardAction.ALLOW,
                 f"Daily loss {daily_loss_pct:.2%} ≥ limit {self._s.MAX_DAILY_LOSS_PCT:.2%}",
             )
         return GuardResult(GuardAction.ALLOW)
@@ -92,12 +97,12 @@ class RiskGuards:
     def _check_weekly_loss(
         self, equity: float, weekly_pnl: float, initial_capital: float
     ) -> GuardResult:
-        """Halt new entries if weekly loss exceeds limit."""
+        """주간 손실 모니터링 — 거래 중지 없이 경고만 (복리 극대화 전략)."""
         weekly_loss_pct = -weekly_pnl / max(equity - weekly_pnl, 1)
         if weekly_loss_pct >= self._s.MAX_WEEKLY_LOSS_PCT:
-            return GuardResult(
-                GuardAction.PAUSE,
-                f"Weekly loss {weekly_loss_pct:.2%} ≥ limit {self._s.MAX_WEEKLY_LOSS_PCT:.2%}",
+            log.debug(
+                "Weekly loss: %.2f%% ≥ limit %.2f%% — 거래 계속 진행 (복리 모드)",
+                weekly_loss_pct * 100, self._s.MAX_WEEKLY_LOSS_PCT * 100,
             )
         return GuardResult(GuardAction.ALLOW)
 
