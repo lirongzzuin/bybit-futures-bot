@@ -132,15 +132,15 @@ class SignalCombiner:
             total_short = 0.0
 
         # ── Regime directional filter ─────────────────────────────────────────
-        # In a strong trend, suppress counter-trend signals
+        # 15M 레짐 방향 조정: 완전 차단 대신 역방향 신호 감쇠
+        # 완전 차단(0.0)은 HTF 필터와 충돌 → 유효한 페이드 트레이드 차단
+        # HTF가 "베어"이고 15M이 일시적 TRENDING_UP(반등)이면 숏 허용 필요
         if regime == Regime.TRENDING_UP:
-            total_short *= 0.4   # only allow very strong shorts
+            total_short *= 0.25  # 15M 상승장에서 숏 대폭 감쇠 (HTF 베어면 숏 가능)
         elif regime == Regime.TRENDING_DOWN:
-            total_long *= 0.4
+            total_long *= 0.25   # 15M 하락장에서 롱 대폭 감쇠 (HTF 불이면 롱 가능)
 
         # High volatility: slight reduction (still allow breakout scalps)
-        # 0.75 instead of 0.6 → raw score of 0.56 passes threshold 0.42
-        # Volatile markets = larger ATR = bigger potential scalp profits
         if regime == Regime.HIGH_VOLATILITY:
             total_long *= 0.75
             total_short *= 0.75
@@ -150,30 +150,30 @@ class SignalCombiner:
         htf_net = category_scores.get("htf_trend", 0.0)
 
         # 규칙:
-        # htf_net >= +0.25 (4H 상승장): 롱만 허용, 숏 완전 차단
-        # htf_net <= -0.25 (4H 하락장): 숏만 허용, 롱 완전 차단
-        # |htf_net| < 0.25 (4H 중립):  양방향 모두 차단 (노이즈 거래 방지)
-        # 이를 통해 4H 추세와 동방향 거래만 허용
-        HTF_BIAS_MIN = 0.20    # 최소 방향성 요구 (0.25→0.20, 기회 확대)
-        HTF_MILD_BULL = 0.50   # 중간 상승: 롱 허용하지만 50% 감소
-        HTF_MILD_BEAR = 0.50   # 중간 하락: 숏 허용하지만 50% 감소
+        # htf_net >= +0.50 (일봉 강한 상승장): 롱만 허용, 숏 완전 차단
+        # htf_net <= -0.50 (일봉 강한 하락장): 숏만 허용, 롱 완전 차단
+        # |htf_net| < 0.50 (일봉 중립/약한 추세): 양방향 모두 차단 (노이즈 거래 방지)
+        # 0.35→0.50 상향: 명확한 HTF 추세만 허용 → TP1 히트율 개선 목표
+        HTF_BIAS_MIN = 0.50    # 최소 방향성 요구 (강한 HTF 추세만)
+        HTF_MILD_BULL = 0.70   # 중간~강한 상승: 롱 허용하지만 일부 감쇠
+        HTF_MILD_BEAR = 0.70   # 중간~강한 하락: 숏 허용하지만 일부 감쇠
 
         if htf_net >= HTF_BIAS_MIN:
             # 4H 상승 → 숏 완전 차단, 롱 허용 (세기에 따라 조정)
             total_short = 0.0
             if htf_net < HTF_MILD_BULL:
-                # 4H 중간 상승 (0.25~0.50): 롱 신호 60% 감소
-                total_long *= 0.60
-            # htf_net >= 0.50: 롱 전체 허용
+                # 일봉 중간 상승 (0.35~0.60): 롱 신호 50% 감소
+                total_long *= 0.50
+            # htf_net >= 0.60: 롱 전체 허용
         elif htf_net <= -HTF_BIAS_MIN:
-            # 4H 하락 → 롱 완전 차단, 숏 허용 (세기에 따라 조정)
+            # 일봉 하락 → 롱 완전 차단, 숏 허용 (세기에 따라 조정)
             total_long = 0.0
             if htf_net > -HTF_MILD_BEAR:
-                # 4H 중간 하락 (-0.25~-0.50): 숏 신호 60% 감소
-                total_short *= 0.60
-            # htf_net <= -0.50: 숏 전체 허용
+                # 일봉 중간 하락 (-0.35~-0.60): 숏 신호 50% 감소
+                total_short *= 0.50
+            # htf_net <= -0.60: 숏 전체 허용
         else:
-            # 4H 중립 구간 (-0.25~+0.25): 양방향 완전 차단
+            # 일봉 중립 구간 (-0.35~+0.35): 양방향 완전 차단
             total_long = 0.0
             total_short = 0.0
 

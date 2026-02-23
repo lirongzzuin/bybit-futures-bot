@@ -26,13 +26,13 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PCT: float = 0.08           # 8% → Slack 알림 (거래 중지 없음)
     MAX_WEEKLY_LOSS_PCT: float = 0.15          # 15% → Slack 알림 (거래 중지 없음)
     MAX_DRAWDOWN_PCT: float = 0.30             # 30% → HALT (계좌 보호 핵심)
-    MAX_LEVERAGE_CAP: int = 50                 # 50× max leverage (시그널 강도 기반)
-    MAX_CONCURRENT_POSITIONS: int = 3
+    MAX_LEVERAGE_CAP: int = 20                 # 20× max leverage (백테스트: PF=1.001 최적값)
+    MAX_CONCURRENT_POSITIONS: int = 2
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.52       # MTF 정렬 기반 — 고품질 진입 허용
+    SIGNAL_ENTRY_THRESHOLD: float = 0.60       # MTF 정렬 기반 — 최고품질 진입만 허용 (0.60 상향)
     SIGNAL_EXIT_THRESHOLD: float = 0.38
     SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
     TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     ATR_PERIOD: int = 14
     STOP_ATR_MULTIPLIER: float = 2.0
     TP_ATR_MULTIPLIER: float = 3.0
-    TRAILING_STOP_ATR_MULTIPLIER: float = 1.0  # 1.0× ATR trailing — meaningful profit lock after TP1
+    TRAILING_STOP_ATR_MULTIPLIER: float = 1.0  # 1.0× ATR trailing — SCALP profit lock=1.5ATR, TREND lock=3.0ATR
     ADX_PERIOD: int = 14
     ADX_TREND_THRESHOLD: float = 25.0
     ADX_RANGE_THRESHOLD: float = 20.0
@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     # BEAR/SIDEWAYS 모드 심볼: 하락장/횡보장 — BTC + ETH만 거래
     BEAR_MODE_SYMBOLS: str = "BTCUSDT,ETHUSDT"
     # Bear/Sideways 모드에서 허용하는 최대 레버리지 (고배율 스캘핑)
-    BEAR_MAX_LEVERAGE_CAP: int = 50
+    BEAR_MAX_LEVERAGE_CAP: int = 20
     # 매크로 레짐 체크 주기 (시간)
     MACRO_REGIME_CHECK_HOURS: int = 4
     # BULL 전환 확정에 필요한 연속 신호 횟수

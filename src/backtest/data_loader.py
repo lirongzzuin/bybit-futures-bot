@@ -42,6 +42,12 @@ def load_ohlcv(
     """
     cache_file = _CACHE_DIR / f"{symbol}_{interval}.csv"
 
+    # Calculate requested start timestamp
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    requested_start_ms = int(
+        (datetime.now(timezone.utc) - timedelta(days=365 * years)).timestamp() * 1000
+    )
+
     # Check cache
     if not force_refresh and cache_file.exists():
         age_h = (time.time() - cache_file.stat().st_mtime) / 3600
@@ -49,16 +55,17 @@ def load_ohlcv(
             log.info("Loading %s from cache (%s)", symbol, cache_file)
             df = pd.read_csv(cache_file, parse_dates=["datetime"])
             df = df.sort_values("ts").reset_index(drop=True)
-            return df
+            # Filter to requested time window (years parameter)
+            df = df[df["ts"] >= requested_start_ms].reset_index(drop=True)
+            if not df.empty:
+                log.info("Cache filtered to %d bars (last %d years)", len(df), years)
+                return df
 
     log.info("Downloading %s history (interval=%s, years=%d)...", symbol, interval, years)
 
     session = HTTP(api_key=api_key, api_secret=api_secret, testnet=testnet)
 
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = int(
-        (datetime.now(timezone.utc) - timedelta(days=365 * years)).timestamp() * 1000
-    )
+    start_ms = requested_start_ms
 
     interval_ms = _interval_to_ms(interval)
     all_bars = []

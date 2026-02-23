@@ -344,16 +344,21 @@ class StateMachine:
         if partial_pct > 0:
             pos.entry_fee = pos.entry_fee * (1.0 - partial_pct)
 
-        # Move stop to breakeven, target to TP2
-        pos.stop_price = pos.entry_price
+        # Move stop to profit-lock level, target to TP2
+        # Stop = TP1 - trailing_dist → locks in profit even if remaining is stopped
+        # SCALP:  tp1=2.5ATR, trailing=1.5ATR → stop at +1.0 ATR above entry
+        # TREND:  tp1=4.0ATR, trailing=1.5ATR → stop at +2.5 ATR above entry
+        profit_lock = pos.tp1_price - pos.trailing_stop_distance if pos.is_long else pos.tp1_price + pos.trailing_stop_distance
+        pos.stop_price = max(pos.entry_price, profit_lock) if pos.is_long else min(pos.entry_price, profit_lock)
         pos.take_profit_price = pos.tp2_price
         pos.tp1_hit = True
 
         log.info(
             "Partial exit %s | closed=%.4f remaining=%.4f pnl=%.4f "
-            "stop_moved_to=%.4f tp2=%.4f remaining_entry_fee=%.6f",
-            symbol, qty_to_close, pos.qty, pnl, pos.stop_price, pos.tp2_price,
-            pos.entry_fee,
+            "stop_moved_to=%.4f (profit_lock=entry+%.4f) tp2=%.4f remaining_entry_fee=%.6f",
+            symbol, qty_to_close, pos.qty, pnl, pos.stop_price,
+            pos.stop_price - pos.entry_price if pos.is_long else pos.entry_price - pos.stop_price,
+            pos.tp2_price, pos.entry_fee,
         )
         return pnl
 

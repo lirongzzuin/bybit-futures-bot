@@ -447,11 +447,15 @@ class BacktestEngine:
                 # Update portfolio equity with partial gain
                 portfolio.equity += partial_pnl_net
 
-                # Update position: reduce qty, move stop to entry, target to tp2
+                # Update position: reduce qty, move stop to lock in profit, target to tp2
                 pos["qty"] -= qty_partial
                 # Keep proportional entry fee for the remaining position
                 pos["fees"] = pos["fees"] * (1.0 - partial_pct)
-                pos["stop_price"] = pos["entry_price"]   # breakeven stop
+                # Stop at TP1 - trailing_dist: guarantees remaining position exits in profit
+                # SCALP: tp1=2.5 ATR, trailing=1.5 ATR → stop at +1.0 ATR above entry
+                # TREND: tp1=4.0 ATR, trailing=1.5 ATR → stop at +2.5 ATR above entry
+                profit_lock_stop = tp1 - pos["trailing_dist"] if direction == 1 else tp1 + pos["trailing_dist"]
+                pos["stop_price"] = max(pos["entry_price"], profit_lock_stop) if direction == 1 else min(pos["entry_price"], profit_lock_stop)
                 pos["tp1_hit"] = True
                 # tp_price is already TP2 (set in _evaluate_entry)
 
