@@ -75,6 +75,7 @@ class RiskEngine:
         trade_mode: Optional[str] = None,  # "SCALP" or "TREND_RIDE"
         recent_close: Optional[pd.Series] = None,  # for AQR vol-targeting
         win_stats: Optional[dict] = None,           # for quarter-Kelly cap
+        bear_mode: bool = False,  # True = BEAR/SIDEWAYS → BEAR_MAX_LEVERAGE_CAP 사용
     ) -> RiskParameters:
 
         # ── Basic feasibility checks ─────────────────────────────────────────
@@ -155,8 +156,18 @@ class RiskEngine:
         else:
             fund_mod = 1.00
 
-        # (d) Signal strength
-        sig_mod = 0.50 + 0.50 * signal_strength  # 0.55 → 0.775, 1.0 → 1.0
+        # (d) Signal strength — 강한 시그널 = 레버리지 적극 활용
+        # 0.85+: +50% boost, 0.75: +25%, 0.65: neutral, 0.55: -20%, <0.55: -40%
+        if signal_strength >= 0.85:
+            sig_mod = 1.50
+        elif signal_strength >= 0.75:
+            sig_mod = 1.25
+        elif signal_strength >= 0.65:
+            sig_mod = 1.00
+        elif signal_strength >= 0.55:
+            sig_mod = 0.80
+        else:
+            sig_mod = 0.60
 
         # (e) Account health (drawdown + consecutive losses)
         dd_mod = max(0.25, 1.0 - drawdown_pct * 3.0)
@@ -167,15 +178,17 @@ class RiskEngine:
         raw_leverage = base_leverage * vol_mod * liq_mod * fund_mod * sig_mod * health_mod
 
         # Hard caps
-        risk_engine_cap = self._s.MAX_LEVERAGE_CAP
+        # Bear/Sideways 모드: BTC+ETH 고배율 스캘핑 허용 (최대 50×)
+        risk_engine_cap = self._s.BEAR_MAX_LEVERAGE_CAP if bear_mode else self._s.MAX_LEVERAGE_CAP
         exchange_cap = min(symbol_max_leverage, 100)
 
-        # Additional safety: if drawdown > 15%, cap at 5×
-        if drawdown_pct > 0.15:
-            risk_engine_cap = min(risk_engine_cap, 5)
-        # If drawdown > 10%, cap at 10×
-        elif drawdown_pct > 0.10:
-            risk_engine_cap = min(risk_engine_cap, 10)
+        # Additional safety: 드로우다운 비례 캡 (BEAR 50× 모드에서도 작동)
+        # >20% DD: 캡의 25% (BULL 15× → 5×, BEAR 50× → 12×)
+        # >12% DD: 캡의 50% (BULL 15× → 7×, BEAR 50× → 25×)
+        if drawdown_pct > 0.20:
+            risk_engine_cap = min(risk_engine_cap, max(5, risk_engine_cap // 4))
+        elif drawdown_pct > 0.12:
+            risk_engine_cap = min(risk_engine_cap, max(10, risk_engine_cap // 2))
 
         final_leverage = max(1, min(
             math.floor(raw_leverage),

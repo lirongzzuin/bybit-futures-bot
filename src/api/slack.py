@@ -153,13 +153,38 @@ class SlackNotifier:
 
     # ── Risk Alerts ───────────────────────────────────────────────────────────
 
+    def send_market_mode_changed(
+        self,
+        from_mode: str,
+        to_mode: str,
+        reason: str,
+        symbols: List[str],
+        leverage_cap: int,
+    ) -> None:
+        """매크로 시장 레짐 전환 알림."""
+        mode_emoji = {
+            "BULL": "🟢",
+            "BEAR": "🔴",
+            "SIDEWAYS": "🟡",
+        }
+        to_emoji = mode_emoji.get(to_mode, "⚪")
+        sym_str = ", ".join(f"`{s}`" for s in symbols)
+        self._send(
+            f"{to_emoji} *Market Mode Changed*\n"
+            f"  {from_mode} → *{to_mode}*\n"
+            f"  거래 심볼: {sym_str}\n"
+            f"  최대 레버리지: {leverage_cap}×\n"
+            f"  근거: {reason}\n"
+            f"  {_now()}"
+        )
+
     def send_risk_alert(self, alert: str) -> None:
         self._send(f"⚠️ *Risk Alert* | {alert}")
 
     def send_daily_loss_limit(self, loss_pct: float) -> None:
         self._send(
-            f"🛑 *Daily Loss Limit Hit* | {loss_pct:.2%} loss today. "
-            f"Trading halted until tomorrow."
+            f"⚠️ *Daily Loss Alert* | 오늘 손실 {loss_pct:.2%} — "
+            f"거래는 계속 진행됩니다 (복리 모드)."
         )
 
     def send_drawdown_alert(self, dd_pct: float) -> None:
@@ -254,20 +279,22 @@ class SlackNotifier:
 
     def send_daily_briefing(self, report: Dict[str, Any]) -> None:
         """
-        report keys: date, equity, daily_pnl, daily_pct, total_pnl, total_pct,
-                     drawdown, positions, trades_today, win_rate_30d,
-                     leverage_avg, exposure_pct, mode
+        report keys: session, date, time, equity, period_pnl, period_pct,
+                     total_pnl, total_pct, drawdown, positions, trades_today,
+                     win_rate, leverage_avg, exposure_pct, mode
         """
+        session = report.get("session", "브리핑")
         date = report.get("date", _now()[:10])
+        time_str = report.get("time", _now()[11:])
         eq = report.get("equity", 0)
-        d_pnl = report.get("daily_pnl", 0)
-        d_pct = report.get("daily_pct", 0)
+        p_pnl = report.get("period_pnl", 0)     # 마지막 브리핑 이후 PnL
+        p_pct = report.get("period_pct", 0)
         t_pnl = report.get("total_pnl", 0)
         t_pct = report.get("total_pct", 0)
         dd = report.get("drawdown", 0)
         positions = report.get("positions", [])
         trades = report.get("trades_today", 0)
-        wr = report.get("win_rate_30d", 0)
+        wr = report.get("win_rate", 0)
         lev = report.get("leverage_avg", 0)
         exp = report.get("exposure_pct", 0)
         mode = report.get("mode", "?")
@@ -278,23 +305,28 @@ class SlackNotifier:
             sym = p.get("symbol", "?")
             sz = p.get("size", 0)
             upnl = p.get("unrealised_pnl", 0)
-            pos_lines += f"  • `{sym}` {side} qty={sz} uPnL={upnl:+.2f}\n"
+            upnl_emoji = "🟢" if upnl >= 0 else "🔴"
+            pos_lines += f"  • {upnl_emoji} `{sym}` {side} qty={sz} uPnL={upnl:+.2f}\n"
         if not pos_lines:
-            pos_lines = "  _No open positions_\n"
+            pos_lines = "  _포지션 없음_\n"
 
         dd_emoji = "🟢" if dd < 0.05 else ("🟡" if dd < 0.15 else "🔴")
-        d_emoji = "🟢" if d_pnl >= 0 else "🔴"
+        p_emoji = "🟢" if p_pnl >= 0 else "🔴"
+        t_emoji = "🟢" if t_pnl >= 0 else "🔴"
+        mode_emoji = {"live": "🔴", "paper": "📄", "dry-run": "🤖"}.get(mode, "⚪")
 
+        sep = "─" * 32
         text = (
-            f"📊 *Daily Briefing* | {date} | Mode: `{mode}`\n"
-            f"─────────────────────────────\n"
-            f"{d_emoji} Today: {d_pnl:+.2f} USDT ({d_pct:+.2%})\n"
-            f"📈 Total: {t_pnl:+.2f} USDT ({t_pct:+.2%})\n"
-            f"💰 Equity: {eq:,.2f} USDT\n"
-            f"{dd_emoji} Max Drawdown: {dd:.2%}\n"
-            f"📦 Exposure: {exp:.1%} | Avg Lev: {lev:.1f}×\n"
-            f"🎯 Trades today: {trades} | 30d Win Rate: {wr:.1%}\n"
-            f"\n*Open Positions:*\n{pos_lines}"
+            f"📊 *{session}* {mode_emoji} `{mode.upper()}`\n"
+            f"{date}  {time_str}\n"
+            f"{sep}\n"
+            f"{p_emoji} 기간 수익 : `{p_pnl:>+10.2f} USDT`  ({p_pct:+.2%})\n"
+            f"{t_emoji} 누적 수익 : `{t_pnl:>+10.2f} USDT`  ({t_pct:+.2%})\n"
+            f"💰 잔고     : `{eq:>10,.2f} USDT`\n"
+            f"{sep}\n"
+            f"{dd_emoji} MDD: {dd:.2%} | 📦 {exp:.1%} 노출 | ×{lev:.1f} 평균레버\n"
+            f"🎯 오늘 거래: {trades}회 | 최근 승률: {wr:.1%}\n"
+            f"\n*Open Positions ({len(positions)}):*\n{pos_lines}"
         )
         self._send(text)
 

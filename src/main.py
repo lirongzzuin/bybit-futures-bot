@@ -40,6 +40,7 @@ from src.risk.profit_protector import ProfitProtector
 from src.strategy.combiner import SignalCombiner
 from src.strategy.ict import ICTAnalyzer
 from src.strategy.indicators import volatility_percentile
+from src.strategy.macro_regime import MacroRegimeDetector, MacroRegime
 from src.strategy.regime import RegimeDetector, Regime
 from src.strategy.scalp import TradeModeDetector
 from src.strategy.signals import SignalGenerator
@@ -78,6 +79,14 @@ class TradingBot:
             initial_capital=settings.PAPER_CAPITAL_USDT,
         )
 
+        # ── Macro Regime ───────────────────────────────────────────────────────
+        self._macro_detector = MacroRegimeDetector(self._client, settings)
+        # 현재 확정된 매크로 레짐: "BULL" | "BEAR_SIDEWAYS"
+        self._macro_mode: str = "BEAR_SIDEWAYS"  # 기본값: 보수적 (BTC/ETH only)
+        # 연속 신호 카운터 (확정 전환을 위한 디바운스)
+        self._macro_bull_streak: int = 0    # 연속 BULL 신호 횟수
+        self._macro_bear_streak: int = 0    # 연속 non-BULL 신호 횟수
+
         # Paper capital tracking
         self._paper_equity = settings.PAPER_CAPITAL_USDT
 
@@ -107,7 +116,7 @@ class TradingBot:
             log.exception("Unexpected error in cycle: %s", e)
 
     def _cycle(self) -> None:
-        # ── 1. Refresh universe ───────────────────────────────────────────────
+        # ── 1. Refresh universe + 매크로 레짐 필터링 ──────────────────────────
         symbols = self._universe.get_or_refresh()
         if not symbols:
             log.warning("Empty universe — skipping cycle")
@@ -115,6 +124,9 @@ class TradingBot:
 
         if self._universe.needs_refresh():
             log.info("Universe refreshed: %s", symbols)
+
+        # 매크로 레짐에 따라 거래 심볼 필터링
+        symbols = self._filter_symbols_by_macro_regime(symbols)
 
         # ── 2. Get account state ──────────────────────────────────────────────
         equity = self._get_equity()
@@ -186,6 +198,7 @@ class TradingBot:
             vwap=snap.vwap,
             vwap_distance_pct=snap.vwap_distance_pct,
             orderbook_imbalance=snap.orderbook.imbalance,
+            htf_df=snap.trend_ohlcv,  # 4H 데이터 → HTF 추세 필터 활성화
         )
         combined = self._combiner.combine(sig_bundle, regime_r)
 
@@ -287,6 +300,8 @@ class TradingBot:
         )
 
         # Calculate risk parameters
+        # Bear/Sideways 모드: BTC+ETH 고배율 레버리지 허용
+        is_bear_mode = (self._macro_mode == "BEAR_SIDEWAYS")
         risk_params = self._risk_engine.calculate(
             equity=equity,
             entry_price=current_price,
@@ -302,6 +317,7 @@ class TradingBot:
             symbol_info=sym_info,
             current_positions=self._state_machine.open_count(),
             trade_mode=mode_result.mode.value,
+            bear_mode=is_bear_mode,
         )
 
         if not risk_params.risk_ok:
@@ -443,17 +459,7 @@ class TradingBot:
                 "net_pnl=%.4f stop→breakeven",
                 symbol, qty_to_close, pnl, fee, pnl_net,
             )
-
-            # Slack: 부분 청산(TP1) 알림 — net PnL 기준
-            side_str = "Buy" if direction == 1 else "Sell"
-            pnl_pct = pnl_net / (pos.entry_price * qty_to_close) if pos.entry_price > 0 and qty_to_close > 0 else 0.0
-            self._slack.send_position_closed(
-                symbol=symbol,
-                side=side_str,
-                reason="PARTIAL_TP1",
-                pnl=pnl_net,
-                pnl_pct=pnl_pct,
-            )
+            # TP1 부분청산은 Slack 알림 없음 (노이즈 감소 — /dashboard 로 확인)
 
     def _execute_exit(self, symbol, pos, current_price, reason, snap) -> None:
         sym_info = self._client.get_symbol_info(symbol)
@@ -515,6 +521,101 @@ class TradingBot:
                 pnl=pnl_net,
                 pnl_pct=pnl_pct,
             )
+
+    # ── Macro Regime ──────────────────────────────────────────────────────────
+
+    def _filter_symbols_by_macro_regime(self, symbols: List[str]) -> List[str]:
+        """
+        매크로 레짐에 따라 거래 심볼을 필터링한다.
+        - BULL 모드: 전체 유니버스 심볼 허용 (멀티코인 스캘핑)
+        - BEAR/SIDEWAYS 모드: BTC + ETH만 허용 (고배율 스캘핑)
+        """
+        if self._macro_mode == "BULL":
+            # BULL 모드 심볼 설정이 있으면 그것만, 없으면 전체 유니버스
+            if settings.BULL_MODE_SYMBOLS:
+                allowed = [s.strip() for s in settings.BULL_MODE_SYMBOLS.split(",") if s.strip()]
+                filtered = [s for s in symbols if s in allowed]
+                return filtered if filtered else symbols
+            return symbols
+        else:
+            # BEAR/SIDEWAYS 모드: BTC + ETH만
+            allowed = [s.strip() for s in settings.BEAR_MODE_SYMBOLS.split(",") if s.strip()]
+            # 현재 포지션 보유 심볼은 항상 포함 (청산 관리 위해)
+            has_position = [s for s in symbols if not self._state_machine.get_position(s).is_flat]
+            target = set(allowed) | set(has_position)
+            # 유니버스에 포함된 심볼 우선, BTC/ETH는 유니버스 여부 무관하게 항상 포함
+            result = [s for s in symbols if s in target]
+            # allowed에 있지만 universe에 없는 심볼 추가 (BTC/ETH 보장)
+            for s in allowed:
+                if s not in result:
+                    result.append(s)
+            return result if result else allowed
+
+    def update_macro_regime(self) -> None:
+        """
+        매크로 레짐을 감지하고, 확정 조건 충족 시 모드를 전환한다.
+        스케줄러에 의해 MACRO_REGIME_CHECK_HOURS마다 호출됨.
+        """
+        try:
+            result = self._macro_detector.detect()
+            is_bull_signal = (result.regime == MacroRegime.BULL)
+
+            prev_mode = self._macro_mode
+
+            if is_bull_signal:
+                self._macro_bull_streak += 1
+                self._macro_bear_streak = 0
+            else:
+                self._macro_bear_streak += 1
+                self._macro_bull_streak = 0
+
+            # BULL 전환: 연속 N회 BULL 신호
+            if (self._macro_bull_streak >= settings.MACRO_BULL_CONFIRM_COUNT
+                    and self._macro_mode != "BULL"):
+                self._macro_mode = "BULL"
+                log.info(
+                    "Macro regime → BULL (streak=%d, confidence=%.2f)",
+                    self._macro_bull_streak, result.confidence,
+                )
+                lev_cap = settings.MAX_LEVERAGE_CAP
+                allowed_syms = (
+                    [s.strip() for s in settings.BULL_MODE_SYMBOLS.split(",") if s.strip()]
+                    or ["(전체 유니버스)"]
+                )
+                self._slack.send_market_mode_changed(
+                    from_mode=prev_mode,
+                    to_mode="BULL",
+                    reason=result.reason,
+                    symbols=allowed_syms,
+                    leverage_cap=lev_cap,
+                )
+
+            # BEAR/SIDEWAYS 전환: 연속 N회 non-BULL 신호
+            elif (self._macro_bear_streak >= settings.MACRO_BEAR_CONFIRM_COUNT
+                    and self._macro_mode != "BEAR_SIDEWAYS"):
+                self._macro_mode = "BEAR_SIDEWAYS"
+                log.info(
+                    "Macro regime → BEAR_SIDEWAYS (streak=%d, regime=%s, confidence=%.2f)",
+                    self._macro_bear_streak, result.regime.value, result.confidence,
+                )
+                bear_syms = [s.strip() for s in settings.BEAR_MODE_SYMBOLS.split(",") if s.strip()]
+                self._slack.send_market_mode_changed(
+                    from_mode=prev_mode,
+                    to_mode=result.regime.value,  # "BEAR" 또는 "SIDEWAYS"
+                    reason=result.reason,
+                    symbols=bear_syms,
+                    leverage_cap=settings.BEAR_MAX_LEVERAGE_CAP,
+                )
+
+            log.debug(
+                "Macro regime check: %s (bull_streak=%d bear_streak=%d) current_mode=%s",
+                result.regime.value,
+                self._macro_bull_streak,
+                self._macro_bear_streak,
+                self._macro_mode,
+            )
+        except Exception as e:
+            log.error("update_macro_regime failed: %s", e)
 
     def _emergency_close_all(self, symbols: List[str]) -> None:
         for symbol in symbols:
@@ -702,41 +803,37 @@ def main():
         id="universe_refresh",
     )
 
-    # Briefing: 09:00 KST 시작, 4시간 간격 (09, 13, 17, 21, 01, 05 KST)
+    # Macro regime check: MACRO_REGIME_CHECK_HOURS마다 BTC 일봉 기반 시장 상황 업데이트
     scheduler.add_job(
-        bot._briefing.send,
-        CronTrigger(hour="9,13,17,21,1,5", minute=0, timezone="Asia/Seoul"),
-        id="periodic_briefing",
+        bot.update_macro_regime,
+        "interval",
+        hours=settings.MACRO_REGIME_CHECK_HOURS,
+        id="macro_regime_check",
     )
 
-    # Real-time dashboard: every N minutes (0 = disabled)
-    if settings.SLACK_DASHBOARD_INTERVAL_MINUTES > 0:
-        scheduler.add_job(
-            bot.send_dashboard,
-            "interval",
-            minutes=settings.SLACK_DASHBOARD_INTERVAL_MINUTES,
-            id="dashboard",
-            max_instances=1,
-            coalesce=True,
-        )
-        log.info(
-            "Dashboard enabled: every %d min via Slack",
-            settings.SLACK_DASHBOARD_INTERVAL_MINUTES,
-        )
+    # Briefing: 09:00 KST + 21:00 KST (하루 2회)
+    # /dashboard 명령어로 수시 확인 가능 → 자동 푸시 최소화
+    scheduler.add_job(
+        bot._briefing.send,
+        CronTrigger(hour="9,21", minute=0, timezone="Asia/Seoul"),
+        id="periodic_briefing",
+    )
 
     scheduler.start()
     log.info("Scheduler started. Running first cycle immediately...")
 
-    # Run first cycle immediately, then send initial dashboard snapshot
+    # 첫 번째 사이클 전에 매크로 레짐 초기 감지
+    try:
+        log.info("Initial macro regime detection...")
+        bot.update_macro_regime()
+    except Exception as e:
+        log.exception("Initial macro regime detection failed: %s", e)
+
+    # Run first cycle immediately
     try:
         bot.run_cycle()
     except Exception as e:
         log.exception("First cycle failed: %s", e)
-
-    try:
-        bot.send_dashboard()
-    except Exception as e:
-        log.exception("Initial dashboard failed: %s", e)
 
     # Graceful shutdown
     def _shutdown(signum, frame):
