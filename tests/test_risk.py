@@ -366,12 +366,13 @@ class TestHighLeverageMode:
         return engine.calculate(**defaults)
 
     def test_ultra_high_signal_achieves_50x(self):
-        """시그널 0.85 + BEAR 모드 + ATR 0.5% → 50× 달성."""
+        """시그널 0.85 + BEAR 모드 + ATR 0.5% → 고배율 달성."""
         engine = self._make_engine()
         result = self._calc(engine, signal_strength=0.90)
         assert result.risk_ok, result.reason
-        # base_lev = 10% / (1.5 × 0.5% × 0.25) = 10% / 0.1875% = 53.3× → cap 50×
-        assert result.leverage >= 40, f"Expected ≥40×, got {result.leverage}×"
+        # base_lev = 10% / (1.5 × 0.5% × 0.40) = 10% / 0.30% = 33.3× (sig_mod 감소 후 ~30×)
+        # 드로우다운 0% → dd_escalation_allowed=True, 안전화된 파라미터로도 30× 달성
+        assert result.leverage >= 25, f"Expected ≥25×, got {result.leverage}×"
 
     def test_signal_tiers_ascending_leverage(self):
         """시그널 강도 증가 → 레버리지 단조 증가."""

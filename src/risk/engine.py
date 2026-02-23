@@ -114,19 +114,24 @@ class RiskEngine:
         #   strength=0.75: stop=0.60×1.5×0.5%=0.4500%, risk= 3% → lev= 3%/0.4500%= 7×
         #   strength=0.65: stop=0.80×1.5×0.5%=0.6000%, risk=2.5%→ lev=2.5%/0.6000%= 4×
         #   default:       stop=1.00×1.5×0.5%=0.7500%, risk=1.5%→ lev=1.5%/0.7500%= 2×
+        # ── Signal-driven risk escalation ─────────────────────────────────────
+        # 드로우다운이 높을수록 에스컬레이션 자동 억제 (안전 장치)
+        # drawdown_pct > 0.15: 에스컬레이션 비활성화 (기본 risk만 사용)
+        dd_escalation_allowed = drawdown_pct <= 0.15
+
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
-        if signal_strength >= 0.85:
-            stop_atr_scale = 0.35           # 타이트하되 노이즈 고려 (0.25→0.35)
-            trade_risk_pct = min(0.13, target_risk * 9.0)   # 최대 13%
-        elif signal_strength >= 0.80:
-            stop_atr_scale = 0.50
-            trade_risk_pct = min(0.07, target_risk * 5.0)   # 최대 7%
-        elif signal_strength >= 0.75:
-            stop_atr_scale = 0.65
-            trade_risk_pct = min(0.035, target_risk * 2.3)  # 최대 3.5%
+        if signal_strength >= 0.85 and dd_escalation_allowed:
+            stop_atr_scale = 0.40           # 타이트하되 노이즈 고려
+            trade_risk_pct = min(0.10, target_risk * 7.0)   # 최대 10% (13%→10% 안전화)
+        elif signal_strength >= 0.80 and dd_escalation_allowed:
+            stop_atr_scale = 0.55
+            trade_risk_pct = min(0.06, target_risk * 4.0)   # 최대 6%
+        elif signal_strength >= 0.75 and dd_escalation_allowed:
+            stop_atr_scale = 0.70
+            trade_risk_pct = min(0.03, target_risk * 2.0)   # 최대 3%
         elif signal_strength >= 0.65:
             stop_atr_scale = 0.85
-            trade_risk_pct = min(0.025, target_risk * 1.7)  # 최대 2.5%
+            trade_risk_pct = min(0.025, target_risk * 1.5)  # 최대 2.5%
         else:
             stop_atr_scale = 1.00
             trade_risk_pct = target_risk                     # 기본값

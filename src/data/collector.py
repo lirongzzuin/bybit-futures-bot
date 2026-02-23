@@ -25,6 +25,8 @@ _INTERVAL_MAP = {
     "60": "60",
     "120": "120",
     "240": "240",
+    "720": "720",
+    "1440": "D",   # 일봉 (1440분 = 24시간 = 1 day)
     "D": "D",
     "W": "W",
 }
@@ -146,7 +148,7 @@ class DataCollector:
         df.reset_index(drop=True, inplace=True)
         return df
 
-    def _fetch_trend_ohlcv(self, symbol: str, limit: int = 250) -> pd.DataFrame:
+    def _fetch_trend_ohlcv(self, symbol: str, limit: int = 300) -> pd.DataFrame:
         """Fetch higher-timeframe (TREND_TIMEFRAME) OHLCV bars."""
         interval = _INTERVAL_MAP.get(self._settings.TREND_TIMEFRAME, "60")
         raw = self._client.get_kline(symbol, interval=interval, limit=limit)

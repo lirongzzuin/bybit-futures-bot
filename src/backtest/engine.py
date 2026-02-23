@@ -139,7 +139,7 @@ class BacktestEngine:
 
         for bar_ts, symbol, bar_idx in bars:
             df = data[symbol]
-            if bar_idx < 300:  # need warmup (300 bars = 75h for EMA100/HTF indicators)
+            if bar_idx < 400:  # need warmup (400 bars = 100h for EMA200/HTF indicators)
                 prev_sym_idx[symbol] = bar_idx
                 continue
 

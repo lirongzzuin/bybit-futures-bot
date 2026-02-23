@@ -45,30 +45,30 @@ class CombinedSignal:
 
 _REGIME_WEIGHTS: Dict[str, Dict[str, float]] = {
     Regime.TRENDING_UP: {
-        # 불마켓 pullback 전략: HTF 방향 + reversion(조정 후 반등) 타이밍
-        # "Buy the Dip in Bull Market" — RSI/BB oversold bounce가 진입 타이밍을 결정
-        "htf_trend": 0.35, "reversion": 0.28, "ict": 0.20, "volume": 0.12,
-        "trend": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        # 불마켓 추세 추종 전략: HTF 방향 + 모멘텀 + ICT 구조
+        # 15분봉에서 reversion(dip-buying)은 false signal이 많음
+        # → 추세 방향 모멘텀 진입이 더 높은 승률 달성
+        "htf_trend": 0.35, "trend": 0.25, "ict": 0.20, "volume": 0.15,
+        "reversion": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
         "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.TRENDING_DOWN: {
-        # 베어마켓 반등 숏 전략: HTF 방향 + reversion(반등 후 매도) 타이밍
-        # "Sell the Rip in Bear Market"
-        "htf_trend": 0.35, "reversion": 0.28, "ict": 0.20, "volume": 0.12,
-        "trend": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        # 베어마켓 추세 추종 숏 전략: HTF 방향 + 모멘텀 + ICT 구조
+        "htf_trend": 0.35, "trend": 0.25, "ict": 0.20, "volume": 0.15,
+        "reversion": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
         "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.RANGING: {
-        # 횡보장: HTF 방향 + reversion(범위 매매) + ICT 지지/저항
-        "htf_trend": 0.35, "reversion": 0.30, "ict": 0.18, "volume": 0.12,
-        "vwap": 0.05, "trend": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        # 횡보장: HTF 방향 + ICT 지지/저항 + 소량 reversion(범위 경계 매매)
+        "htf_trend": 0.35, "ict": 0.25, "volume": 0.15, "reversion": 0.15,
+        "trend": 0.10, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
         "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.HIGH_VOLATILITY: {
-        # 고변동성: HTF 방향 + reversion(극단적 RSI 반등) + volume 확인
-        "htf_trend": 0.40, "reversion": 0.25, "volume": 0.20, "ict": 0.10,
-        "trend": 0.05, "vwap": 0.00, "volatility": 0.00, "squeeze": 0.00,
-        "reversion_hv": 0.00, "orderbook": 0.00, "momentum": 0.00,
+        # 고변동성: HTF 방향 + ICT 브레이크아웃 + volume 폭발 확인
+        "htf_trend": 0.40, "ict": 0.25, "volume": 0.20, "trend": 0.10,
+        "reversion": 0.05, "vwap": 0.00, "volatility": 0.00, "squeeze": 0.00,
+        "orderbook": 0.00, "momentum": 0.00,
     },
 }
 
@@ -154,9 +154,9 @@ class SignalCombiner:
         # htf_net <= -0.25 (4H 하락장): 숏만 허용, 롱 완전 차단
         # |htf_net| < 0.25 (4H 중립):  양방향 모두 차단 (노이즈 거래 방지)
         # 이를 통해 4H 추세와 동방향 거래만 허용
-        HTF_BIAS_MIN = 0.25    # 최소 4H 방향성 요구
-        HTF_MILD_BULL = 0.50   # 4H 중간 상승: 롱은 허용하지만 60% 감소
-        HTF_MILD_BEAR = 0.50   # 4H 중간 하락: 숏은 허용하지만 60% 감소
+        HTF_BIAS_MIN = 0.20    # 최소 방향성 요구 (0.25→0.20, 기회 확대)
+        HTF_MILD_BULL = 0.50   # 중간 상승: 롱 허용하지만 50% 감소
+        HTF_MILD_BEAR = 0.50   # 중간 하락: 숏 허용하지만 50% 감소
 
         if htf_net >= HTF_BIAS_MIN:
             # 4H 상승 → 숏 완전 차단, 롱 허용 (세기에 따라 조정)

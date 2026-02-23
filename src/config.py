@@ -23,17 +23,17 @@ class Settings(BaseSettings):
     # ── Capital & Risk ────────────────────────────────────────
     PAPER_CAPITAL_USDT: float = 10000.0
     MAX_RISK_PER_TRADE_PCT: float = 0.02       # 2% equity risk per trade (aggressive compounding)
-    MAX_DAILY_LOSS_PCT: float = 0.08           # 8% → halt trading for today
-    MAX_WEEKLY_LOSS_PCT: float = 0.15          # 15% → halt for the week
-    MAX_DRAWDOWN_PCT: float = 0.30             # 30% → switch to conservative
-    MAX_LEVERAGE_CAP: int = 10                 # 10× max leverage
+    MAX_DAILY_LOSS_PCT: float = 0.08           # 8% → Slack 알림 (거래 중지 없음)
+    MAX_WEEKLY_LOSS_PCT: float = 0.15          # 15% → Slack 알림 (거래 중지 없음)
+    MAX_DRAWDOWN_PCT: float = 0.30             # 30% → HALT (계좌 보호 핵심)
+    MAX_LEVERAGE_CAP: int = 50                 # 50× max leverage (시그널 강도 기반)
     MAX_CONCURRENT_POSITIONS: int = 3
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.52       # MTF 정렬 기반 — 고품질 진입만 허용
-    SIGNAL_EXIT_THRESHOLD: float = 0.42
+    SIGNAL_ENTRY_THRESHOLD: float = 0.52       # MTF 정렬 기반 — 고품질 진입 허용
+    SIGNAL_EXIT_THRESHOLD: float = 0.38
     SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
     TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
     UNIVERSE_REFRESH_INTERVAL_HOURS: int = 4
@@ -41,24 +41,24 @@ class Settings(BaseSettings):
 
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.5               # 15분봉 ATR 기반 — 노이즈 초과 SL
-    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 1.67:1 (승률 높은 구간)
-    SCALP_TP2_ATR: float = 5.0                # TP2 R:R 3.33:1 (추세 연장 시)
-    SCALP_MAX_BARS: int = 24                   # 15분봉 × 24 = 6시간 최대
+    SCALP_STOP_ATR: float = 1.2               # 타이트 SL → 높은 R:R 달성
+    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 2.08:1 (TP1 후 +1.0 ATR 트레일링)
+    SCALP_TP2_ATR: float = 5.5                # TP2 R:R 4.58:1 (풀 트렌드 수익)
+    SCALP_MAX_BARS: int = 48                   # 15분봉 × 48 = 12시간 최대
     SCALP_PARTIAL_EXIT_PCT: float = 0.55       # 55% TP1에서 청산, 45% 추세 유지
 
     # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
-    TREND_STOP_ATR: float = 2.5               # 4H 추세 동행 — 더 여유 있는 SL
-    TREND_TP1_ATR: float = 4.0                # TP1 R:R 1.6:1
-    TREND_TP2_ATR: float = 8.0                # TP2 R:R 3.2:1 — 풀 트렌드 수익
-    TREND_MAX_BARS: int = 96                   # 15분봉 × 96 = 24시간 최대
-    TREND_PARTIAL_EXIT_PCT: float = 0.40       # close 40% at TP1, keep 60% for full run
-    TREND_RIDE_SCORE_THRESHOLD: int = 2        # allow trend ride more often
+    TREND_STOP_ATR: float = 2.0               # 일봉 추세 동행 — 여유 있는 SL
+    TREND_TP1_ATR: float = 4.0                # TP1 R:R 2.0:1 (TP1 후 +2.5ATR 트레일링)
+    TREND_TP2_ATR: float = 10.0               # TP2 R:R 5.0:1 — 풀 트렌드 수익 극대화
+    TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
+    TREND_PARTIAL_EXIT_PCT: float = 0.45       # close 45% at TP1, keep 55% for full run
+    TREND_RIDE_SCORE_THRESHOLD: int = 1        # allow trend ride more often
 
-    # ── Signal Quality Filters (15분봉 기준 강화) ─────────────────
-    SIGNAL_FILTER_ER_THRESHOLD: float = 0.10   # 추세성 확인 (0.15보다 약간 완화)
-    SIGNAL_FILTER_HURST_MIN: float = 0.46      # 평균회귀 구간 진입 회피
-    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.002   # 최소 0.2% ATR (수수료 대비 여유)
+    # ── Signal Quality Filters (15분봉 기준 최적화) ─────────────────
+    SIGNAL_FILTER_ER_THRESHOLD: float = 0.06   # 추세성 확인 (완화로 기회 확대)
+    SIGNAL_FILTER_HURST_MIN: float = 0.42      # 평균회귀 구간 진입 회피
+    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.0012  # 최소 0.12% ATR (수수료 대비 여유)
 
     # ── Higher Timeframe (4H) Trend Filter ──────────────────────
     HTF_EMA_FAST: int = 9                      # 4H EMA fast
