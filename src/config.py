@@ -32,33 +32,44 @@ class Settings(BaseSettings):
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.42       # lower threshold for high-frequency scalping
-    SIGNAL_EXIT_THRESHOLD: float = 0.35
-    SIGNAL_TIMEFRAME: str = "5"                # 5-minute scalping
-    TREND_TIMEFRAME: str = "60"                # higher timeframe for regime detection
+    SIGNAL_ENTRY_THRESHOLD: float = 0.52       # MTF 정렬 기반 — 고품질 진입만 허용
+    SIGNAL_EXIT_THRESHOLD: float = 0.42
+    SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
+    TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
     UNIVERSE_REFRESH_INTERVAL_HOURS: int = 4
     TOP_N_COINS: int = 10                      # more symbols = more opportunities
 
-    # ── Scalping Parameters ───────────────────────────────────────
+    # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.0               # tight stop for scalping
-    SCALP_TP1_ATR: float = 1.5                # TP1 at 1.5× stop (R:R 1.5)
-    SCALP_TP2_ATR: float = 3.0                # TP2 at 3.0× stop (R:R 3.0)
-    SCALP_MAX_BARS: int = 12                   # quick exit — 1 hour max on 5m bars
-    SCALP_PARTIAL_EXIT_PCT: float = 0.60       # close 60% at TP1 — lock profit fast
+    SCALP_STOP_ATR: float = 1.5               # 15분봉 ATR 기반 — 노이즈 초과 SL
+    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 1.67:1 (승률 높은 구간)
+    SCALP_TP2_ATR: float = 5.0                # TP2 R:R 3.33:1 (추세 연장 시)
+    SCALP_MAX_BARS: int = 24                   # 15분봉 × 24 = 6시간 최대
+    SCALP_PARTIAL_EXIT_PCT: float = 0.55       # 55% TP1에서 청산, 45% 추세 유지
 
-    # ── Trend Ride Parameters ─────────────────────────────────────
-    TREND_STOP_ATR: float = 2.0               # wide stop for genuine trend ride
-    TREND_TP1_ATR: float = 3.0                # first TP at 1.5× stop
-    TREND_TP2_ATR: float = 6.0                # final TP at 3× stop for full trend capture
-    TREND_MAX_BARS: int = 120                  # max bars in trend ride
+    # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
+    TREND_STOP_ATR: float = 2.5               # 4H 추세 동행 — 더 여유 있는 SL
+    TREND_TP1_ATR: float = 4.0                # TP1 R:R 1.6:1
+    TREND_TP2_ATR: float = 8.0                # TP2 R:R 3.2:1 — 풀 트렌드 수익
+    TREND_MAX_BARS: int = 96                   # 15분봉 × 96 = 24시간 최대
     TREND_PARTIAL_EXIT_PCT: float = 0.40       # close 40% at TP1, keep 60% for full run
     TREND_RIDE_SCORE_THRESHOLD: int = 2        # allow trend ride more often
 
-    # ── Signal Quality Filters (Kaufman / Peters) ─────────────────
-    SIGNAL_FILTER_ER_THRESHOLD: float = 0.06    # permissive ER for high-frequency scalping
-    SIGNAL_FILTER_HURST_MIN: float = 0.40       # allow lower Hurst for scalping
-    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.001    # min 0.10% ATR → TP1=0.15% > 0.040% fee ✓
+    # ── Signal Quality Filters (15분봉 기준 강화) ─────────────────
+    SIGNAL_FILTER_ER_THRESHOLD: float = 0.10   # 추세성 확인 (0.15보다 약간 완화)
+    SIGNAL_FILTER_HURST_MIN: float = 0.46      # 평균회귀 구간 진입 회피
+    SIGNAL_FILTER_MIN_ATR_PCT: float = 0.002   # 최소 0.2% ATR (수수료 대비 여유)
+
+    # ── Higher Timeframe (4H) Trend Filter ──────────────────────
+    HTF_EMA_FAST: int = 9                      # 4H EMA fast
+    HTF_EMA_MID: int = 21                      # 4H EMA mid
+    HTF_EMA_SLOW: int = 50                     # 4H EMA slow (추세 방향 기준)
+    HTF_EMA_TREND: int = 200                   # 일봉 EMA 200 (불/베어마켓 가장 중요한 기준선)
+    HTF_ADX_THRESHOLD: float = 20.0            # 4H ADX 최소값 (추세 확인)
+    HTF_RSI_BULL_MIN: float = 40.0             # 롱 진입 시 4H RSI 최소 (과매도 회피)
+    HTF_RSI_BULL_MAX: float = 70.0             # 롱 진입 시 4H RSI 최대 (과매수 회피)
+    HTF_RSI_BEAR_MIN: float = 30.0             # 숏 진입 시 4H RSI 최소
+    HTF_RSI_BEAR_MAX: float = 60.0             # 숏 진입 시 4H RSI 최대
 
     # ── Advanced Risk Management ──────────────────────────────────
     VOLATILITY_TARGET_PCT: float = 0.15         # AQR vol-targeting (15% annualized)
@@ -105,7 +116,7 @@ class Settings(BaseSettings):
     # ── Order Execution ───────────────────────────────────────
     LIMIT_ORDER_TIMEOUT_SECONDS: int = 30
     LIMIT_ORDER_MAX_RETRIES: int = 3
-    REENTRY_COOLDOWN_SECONDS: int = 300        # 5 min = 1 full bar on 5m timeframe
+    REENTRY_COOLDOWN_SECONDS: int = 900        # 15 min = 1 full bar on 15m timeframe
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
 
     # ── Backtest ─────────────────────────────────────────────
@@ -117,24 +128,42 @@ class Settings(BaseSettings):
     BACKTEST_INITIAL_CAPITAL: float = 10000.0
     BACKTEST_FUNDING_RATE_AVG: float = 0.0001  # avg funding rate per 8h interval
 
-    # ── Quality Gate ─────────────────────────────────────────
-    QUALITY_GATE_SHARPE: float = 1.0
-    QUALITY_GATE_MDD: float = 0.30
-    QUALITY_GATE_WIN_RATE: float = 0.45
-    QUALITY_GATE_PROFIT_FACTOR: float = 1.5
-    QUALITY_GATE_MIN_TRADES: int = 100
+    # ── Quality Gate (MTF 전략 기준 상향) ────────────────────────
+    QUALITY_GATE_SHARPE: float = 1.2
+    QUALITY_GATE_MDD: float = 0.25
+    QUALITY_GATE_WIN_RATE: float = 0.60        # 60%+ 승률 목표
+    QUALITY_GATE_PROFIT_FACTOR: float = 1.8    # PF 1.8+ 목표
+    QUALITY_GATE_MIN_TRADES: int = 50          # MTF는 진입 횟수 줄어드므로 조정
     QUALITY_GATE_PASSED: bool = False      # flipped only by backtest runner
 
     # ── Profit Protection ─────────────────────────────────────
     PROFIT_PROTECT_ENABLED: bool = True
+    # 최소 계좌 잔고: 이 금액 이상일 때만 이체 실행 (복리 성장 단계 보호)
+    # $10,000 달성 전까지 이체 비활성화 → 복리의 마법 최대한 누리기
+    PROFIT_PROTECT_MIN_EQUITY_USDT: float = 10000.0
     # Transfer to Funding Account when profit exceeds this % of initial capital
     PROFIT_PROTECT_THRESHOLD_PCT: float = 0.20    # 20% profit → trigger
     # What fraction of the profit to move to Funding Account
-    PROFIT_PROTECT_TRANSFER_PCT: float = 0.50     # move 50% of profits
+    # 복리 극대화: 수익의 20%만 이체 (80%는 재투자)
+    PROFIT_PROTECT_TRANSFER_PCT: float = 0.20     # move 20% of profits (복리 극대화)
     # Always keep at least this multiple of initial capital in trading account
     PROFIT_PROTECT_MIN_CAPITAL_PCT: float = 1.10  # keep ≥ 110% of initial capital
     # How often to check (hours)
     PROFIT_PROTECT_CHECK_HOURS: int = 24
+
+    # ── Macro Regime (시장 상황 자동 전환) ────────────────────────────────────
+    # BULL  모드 심볼: 상승장 — 멀티코인 스캘핑 (빈 문자열 = TOP_N_COINS 자동 선택)
+    BULL_MODE_SYMBOLS: str = ""
+    # BEAR/SIDEWAYS 모드 심볼: 하락장/횡보장 — BTC + ETH만 거래
+    BEAR_MODE_SYMBOLS: str = "BTCUSDT,ETHUSDT"
+    # Bear/Sideways 모드에서 허용하는 최대 레버리지 (고배율 스캘핑)
+    BEAR_MAX_LEVERAGE_CAP: int = 50
+    # 매크로 레짐 체크 주기 (시간)
+    MACRO_REGIME_CHECK_HOURS: int = 4
+    # BULL 전환 확정에 필요한 연속 신호 횟수
+    MACRO_BULL_CONFIRM_COUNT: int = 3
+    # BEAR/SIDEWAYS 전환 확정에 필요한 연속 신호 횟수
+    MACRO_BEAR_CONFIRM_COUNT: int = 2
 
     # ── Slack ─────────────────────────────────────────────────
     SLACK_WEBHOOK_URL: str = ""

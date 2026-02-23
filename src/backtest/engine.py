@@ -85,12 +85,17 @@ class BacktestEngine:
         self._combiner = SignalCombiner(cfg)
         self._mode_detector = TradeModeDetector(cfg)
         self._quality_filter = QualityFilter(cfg)
-        # How many 5-min bars in 8 hours (funding interval)
-        self._funding_bars = 96
-        # Filter result cache: symbol → (bar_idx, result)
-        # Recompute only every 12 bars (1 hour of 5-min data) to avoid O(n²) cost
+        # 15분봉 기준: 8시간 = 32봉 (펀딩 주기)
+        tf_min = int(self._s.SIGNAL_TIMEFRAME) if self._s.SIGNAL_TIMEFRAME.isdigit() else 15
+        self._funding_bars = max(1, 480 // tf_min)   # 8h in tf_min bars
+        # HTF 리샘플 비율: TREND_TIMEFRAME (일봉=1440, 4H=240) 기반으로 계산
+        trend_tf_min = int(self._s.TREND_TIMEFRAME) if self._s.TREND_TIMEFRAME.isdigit() else 240
+        self._htf_ratio = max(1, trend_tf_min // tf_min)
+        # Filter cache: 1시간마다 재계산 (4 bars on 15m)
         self._filter_cache: dict = {}
-        self._filter_every = 12
+        self._filter_every = max(1, 60 // tf_min)
+        # HTF data cache: symbol → resampled higher-TF df (populated in run())
+        self._htf_data: dict = {}
 
     def run(
         self,
@@ -114,6 +119,12 @@ class BacktestEngine:
             log.error("No data available for backtest")
             return {}
 
+        # Pre-compute 4H (HTF) resampled data for each symbol
+        # 4H 추세 필터를 백테스트에서도 동일하게 적용
+        self._htf_data = {}
+        for sym, df in data.items():
+            self._htf_data[sym] = self._resample_to_htf(df, self._htf_ratio)
+
         # Build sorted list of all bars across symbols
         bars = []
         for sym, df in data.items():
@@ -128,7 +139,7 @@ class BacktestEngine:
 
         for bar_ts, symbol, bar_idx in bars:
             df = data[symbol]
-            if bar_idx < 60:  # need warmup
+            if bar_idx < 300:  # need warmup (300 bars = 75h for EMA100/HTF indicators)
                 prev_sym_idx[symbol] = bar_idx
                 continue
 
@@ -137,16 +148,12 @@ class BacktestEngine:
                 equity_curve.append((bar_ts, portfolio.equity))
                 portfolio.update_peak()
 
-            # Guard: max drawdown halt
-            if portfolio.drawdown >= self._s.MAX_DRAWDOWN_PCT:
-                continue
-
             row = df.iloc[bar_idx]
             close = float(row.close)
             high = float(row.high)
             low = float(row.low)
 
-            # ── Check existing position for exit ─────────────────────────────
+            # ── Check existing position for exit (always — even during drawdown) ──
             if symbol in portfolio.open_positions:
                 pos = portfolio.open_positions[symbol]
                 trade = self._check_exits(
@@ -170,6 +177,10 @@ class BacktestEngine:
                     else:
                         portfolio.consecutive_losses[symbol] = 0
                     continue
+
+            # Guard: max drawdown halt — no NEW entries allowed
+            if portfolio.drawdown >= self._s.MAX_DRAWDOWN_PCT:
+                continue
 
             # ── Check for new entry ───────────────────────────────────────────
             if symbol in portfolio.open_positions:
@@ -253,7 +264,23 @@ class BacktestEngine:
             # hurst_max_lags=0 = fast mode (skip O(n²) Hurst in backtest)
             regime_r = self._regime.detect(window, hurst_max_lags=0)
             ict_r = self._ict.analyze(window)
-            sig_bundle = self._sig_gen.generate(window, ict_r)
+
+            # HTF (4H) 데이터: 현재 15M 봉에 해당하는 4H 봉까지 사용
+            htf_window = None
+            htf_df_full = self._htf_data.get(symbol)
+            if htf_df_full is not None and len(htf_df_full) > 0:
+                # 룩어헤드 바이어스 방지: 현재 진행 중인 4H 봉은 사용 불가
+                # bar_idx // ratio = 현재 4H 그룹 (미완성 가능)
+                # -1 해서 직전 완성된 4H 봉까지만 사용
+                htf_bar_idx = (bar_idx // self._htf_ratio) - 1
+                min_htf_needed = self._s.HTF_EMA_TREND + 15
+                if htf_bar_idx >= min_htf_needed:
+                    htf_start = max(0, htf_bar_idx - (self._s.HTF_EMA_TREND + 50))
+                    htf_window = htf_df_full.iloc[htf_start: htf_bar_idx + 1]
+                    if len(htf_window) < min_htf_needed:
+                        htf_window = None
+
+            sig_bundle = self._sig_gen.generate(window, ict_r, htf_df=htf_window)
             combined = self._combiner.combine(sig_bundle, regime_r)
         except Exception as e:
             log.debug("Signal error at bar %d: %s", bar_idx, e)
@@ -517,6 +544,29 @@ class BacktestEngine:
         t.entry_ts = pos.get("entry_ts", 0)
 
         return t
+
+    def _resample_to_htf(self, df: pd.DataFrame, ratio: int) -> pd.DataFrame:
+        """
+        15분봉 → 4시간봉으로 리샘플 (ratio=16: 16×15m=240m=4h).
+        백테스트에서 HTF 추세 필터를 현실적으로 시뮬레이션.
+        """
+        if df.empty or len(df) < ratio:
+            return pd.DataFrame()
+        try:
+            df = df.copy().reset_index(drop=True)
+            df["htf_group"] = df.index // ratio
+            htf = df.groupby("htf_group").agg(
+                ts=("ts", "first"),
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last"),
+                volume=("volume", "sum"),
+            ).reset_index(drop=True)
+            htf["datetime"] = pd.to_datetime(htf["ts"], unit="ms", utc=True)
+            return htf
+        except Exception:
+            return pd.DataFrame()
 
     def _force_close(self, pos: dict, df: pd.DataFrame, bar_idx: int,
                      price: float, portfolio: PortfolioState) -> Optional[BacktestTrade]:

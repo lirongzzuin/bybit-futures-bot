@@ -2,12 +2,16 @@
 Signal Combiner — applies regime-based weights to the signal bundle
 and produces a final CombinedSignal with direction and strength.
 
-Category weights per regime:
-  TRENDING_UP/DOWN : trend(0.27) + ict(0.30) + vwap(0.08) + volume(0.12) + volatility(0.06)
-                   + reversion(0.03) + squeeze(0.08) + orderbook(0.00) + momentum(0.06)
-  RANGING          : reversion(0.25) + ict(0.22) + vwap(0.10) + volume(0.18) + orderbook(0.04)
-                   + trend(0.05) + volatility(0.04) + squeeze(0.06) + momentum(0.06)
-  HIGH_VOLATILITY  : all weights reduced; reversion suppressed; volatility elevated; squeeze emphasized
+MTF 전략 (15분봉+4시간봉) 가중치 구조:
+  htf_trend가 최우선 필터 역할 — 4H 추세와 역방향 신호 차단
+
+  TRENDING_UP/DOWN : htf_trend(0.30) + ict(0.22) + trend(0.20) + volume(0.10)
+                   + vwap(0.06) + squeeze(0.06) + volatility(0.04) + reversion(0.02)
+  RANGING          : htf_trend(0.25) + reversion(0.18) + ict(0.18) + volume(0.14)
+                   + vwap(0.08) + trend(0.04) + squeeze(0.05) + volatility(0.04)
+                   + orderbook(0.04)
+  HIGH_VOLATILITY  : htf_trend(0.28) + ict(0.20) + trend(0.14) + volume(0.14)
+                   + volatility(0.10) + squeeze(0.07) + vwap(0.07)
 """
 from __future__ import annotations
 
@@ -41,28 +45,30 @@ class CombinedSignal:
 
 _REGIME_WEIGHTS: Dict[str, Dict[str, float]] = {
     Regime.TRENDING_UP: {
-        # Trending: heavy ICT + trend + squeeze momentum; reduce reversion noise
-        "trend": 0.27, "ict": 0.30, "vwap": 0.08, "volume": 0.12,
-        "volatility": 0.06, "reversion": 0.03, "orderbook": 0.00,
-        "squeeze": 0.08, "momentum": 0.06,
+        # 불마켓 pullback 전략: HTF 방향 + reversion(조정 후 반등) 타이밍
+        # "Buy the Dip in Bull Market" — RSI/BB oversold bounce가 진입 타이밍을 결정
+        "htf_trend": 0.35, "reversion": 0.28, "ict": 0.20, "volume": 0.12,
+        "trend": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.TRENDING_DOWN: {
-        # Same as TRENDING_UP — ICT leads, trend confirms
-        "trend": 0.27, "ict": 0.30, "vwap": 0.08, "volume": 0.12,
-        "volatility": 0.06, "reversion": 0.03, "orderbook": 0.00,
-        "squeeze": 0.08, "momentum": 0.06,
+        # 베어마켓 반등 숏 전략: HTF 방향 + reversion(반등 후 매도) 타이밍
+        # "Sell the Rip in Bear Market"
+        "htf_trend": 0.35, "reversion": 0.28, "ict": 0.20, "volume": 0.12,
+        "trend": 0.05, "vwap": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.RANGING: {
-        # Ranging: reversion + volume-profile + squeeze signals dominate
-        "trend": 0.05, "ict": 0.22, "vwap": 0.10, "volume": 0.18,
-        "volatility": 0.04, "reversion": 0.25, "orderbook": 0.04,
-        "squeeze": 0.06, "momentum": 0.06,
+        # 횡보장: HTF 방향 + reversion(범위 매매) + ICT 지지/저항
+        "htf_trend": 0.35, "reversion": 0.30, "ict": 0.18, "volume": 0.12,
+        "vwap": 0.05, "trend": 0.00, "squeeze": 0.00, "volatility": 0.00,
+        "orderbook": 0.00, "momentum": 0.00,
     },
     Regime.HIGH_VOLATILITY: {
-        # High vol: prefer squeeze breakouts and ICT; suppress reversion
-        "trend": 0.16, "ict": 0.25, "vwap": 0.09, "volume": 0.18,
-        "volatility": 0.12, "reversion": 0.04, "orderbook": 0.04,
-        "squeeze": 0.08, "momentum": 0.04,
+        # 고변동성: HTF 방향 + reversion(극단적 RSI 반등) + volume 확인
+        "htf_trend": 0.40, "reversion": 0.25, "volume": 0.20, "ict": 0.10,
+        "trend": 0.05, "vwap": 0.00, "volatility": 0.00, "squeeze": 0.00,
+        "reversion_hv": 0.00, "orderbook": 0.00, "momentum": 0.00,
     },
 }
 
@@ -85,7 +91,7 @@ class SignalCombiner:
         category_scores: Dict[str, float] = {}
 
         for cat in ("trend", "reversion", "volatility", "volume", "ict", "vwap", "orderbook",
-                    "momentum", "squeeze"):
+                    "momentum", "squeeze", "htf_trend"):
             cat_signals = bundle.by_category(cat)
             if not cat_signals:
                 category_long[cat] = 0.0
@@ -138,6 +144,38 @@ class SignalCombiner:
         if regime == Regime.HIGH_VOLATILITY:
             total_long *= 0.75
             total_short *= 0.75
+
+        # ── HTF 방향성 정렬 필터 ─────────────────────────────────────────────────
+        # htf_trend 카테고리의 net score (-1 to +1)
+        htf_net = category_scores.get("htf_trend", 0.0)
+
+        # 규칙:
+        # htf_net >= +0.25 (4H 상승장): 롱만 허용, 숏 완전 차단
+        # htf_net <= -0.25 (4H 하락장): 숏만 허용, 롱 완전 차단
+        # |htf_net| < 0.25 (4H 중립):  양방향 모두 차단 (노이즈 거래 방지)
+        # 이를 통해 4H 추세와 동방향 거래만 허용
+        HTF_BIAS_MIN = 0.25    # 최소 4H 방향성 요구
+        HTF_MILD_BULL = 0.50   # 4H 중간 상승: 롱은 허용하지만 60% 감소
+        HTF_MILD_BEAR = 0.50   # 4H 중간 하락: 숏은 허용하지만 60% 감소
+
+        if htf_net >= HTF_BIAS_MIN:
+            # 4H 상승 → 숏 완전 차단, 롱 허용 (세기에 따라 조정)
+            total_short = 0.0
+            if htf_net < HTF_MILD_BULL:
+                # 4H 중간 상승 (0.25~0.50): 롱 신호 60% 감소
+                total_long *= 0.60
+            # htf_net >= 0.50: 롱 전체 허용
+        elif htf_net <= -HTF_BIAS_MIN:
+            # 4H 하락 → 롱 완전 차단, 숏 허용 (세기에 따라 조정)
+            total_long = 0.0
+            if htf_net > -HTF_MILD_BEAR:
+                # 4H 중간 하락 (-0.25~-0.50): 숏 신호 60% 감소
+                total_short *= 0.60
+            # htf_net <= -0.50: 숏 전체 허용
+        else:
+            # 4H 중립 구간 (-0.25~+0.25): 양방향 완전 차단
+            total_long = 0.0
+            total_short = 0.0
 
         # ── Determine direction and strength ──────────────────────────────────
         threshold = self._s.SIGNAL_ENTRY_THRESHOLD

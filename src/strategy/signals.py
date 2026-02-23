@@ -25,6 +25,7 @@ import pandas as pd
 
 from src.config import Settings
 from src.strategy.indicators import (
+    adx,
     atr,
     bollinger_bands,
     cmf,
@@ -92,6 +93,7 @@ class SignalGenerator:
         vwap: float = 0.0,
         vwap_distance_pct: float = 0.0,
         orderbook_imbalance: float = 0.0,
+        htf_df: Optional[pd.DataFrame] = None,  # 4시간봉 데이터 (HTF 추세 필터)
     ) -> SignalBundle:
         bundle = SignalBundle()
 
@@ -155,11 +157,17 @@ class SignalGenerator:
         # ── Category 15: Squeeze Momentum ─────────────────────────────────────
         bundle.signals += self._squeeze_signal(close, high, low)
 
+        # ── Category 16: HTF Trend Filter (4시간봉 추세 방향) ─────────────────
+        # 가장 중요한 필터 — 4H 추세 반대 방향 진입 차단
+        if htf_df is not None and len(htf_df) >= 50:
+            bundle.signals += self._htf_trend_signals(htf_df)
+
         return bundle
 
     # ── Trend / Momentum ──────────────────────────────────────────────────────
 
-    def _trend_signals(self, close: pd.Series, high: pd.Series, low: pd.Series) -> List[Signal]:
+    def _trend_signals(self, close: pd.Series, high: pd.Series,
+                       low: pd.Series) -> List[Signal]:
         signals = []
 
         # EMA cross (fast vs mid)
@@ -233,6 +241,45 @@ class SignalGenerator:
             confidence=min(1.0, abs(rsi_val - 50) / 50),
             category="trend",
         ))
+
+        # ── 15M 풀백 품질 필터 ────────────────────────────────────────────────
+        # 추세 동행 매매에서 RSI 45-60 구간 진입이 최고 승률 (풀백 확인)
+        # 과매수(RSI>70)에서 롱 진입 = 저승률, 과매도(RSI<30)에서 숏 진입 = 저승률
+        if trend_dir == 1:    # 상승 추세
+            if 45 <= rsi_val <= 62:
+                # 이상적인 롱 진입 구간 (풀백 후 반등 확인)
+                signals.append(Signal(
+                    name="pullback_quality_bull",
+                    direction=1,
+                    confidence=0.75,
+                    category="trend",
+                ))
+            elif rsi_val > 72:
+                # 과매수 구간에서 롱 진입 억제 (추격매수 위험)
+                signals.append(Signal(
+                    name="pullback_quality_bull",
+                    direction=-1,
+                    confidence=0.45,
+                    category="trend",
+                ))
+        elif trend_dir == -1:  # 하락 추세
+            if 48 <= rsi_val <= 65:
+                # 이상적인 숏 진입 구간: 가격이 반등 후 RSI 50-65로 회복 → 재하락 진입
+                # (38-55가 아닌 50-65 — 반등 완료 후 진입이 승률 높음)
+                signals.append(Signal(
+                    name="pullback_quality_bear",
+                    direction=-1,
+                    confidence=0.75,
+                    category="trend",
+                ))
+            elif rsi_val < 28:
+                # 과매도 극단 — 숏 진입 억제 (반등 위험)
+                signals.append(Signal(
+                    name="pullback_quality_bear",
+                    direction=1,
+                    confidence=0.45,
+                    category="trend",
+                ))
 
         return signals
 
@@ -905,6 +952,154 @@ class SignalGenerator:
                 ))
         except Exception:
             pass
+        return signals
+
+    # ── HTF Trend Filter (4H timeframe) ──────────────────────────────────────
+
+    def _htf_trend_signals(self, htf_df: pd.DataFrame) -> list:
+        """
+        4시간봉 기반 추세 방향 신호 — 가장 높은 가중치 카테고리.
+
+        규칙:
+        - EMA9 > EMA21 > EMA50 > EMA200 (완전 정렬) → 강한 상승 추세
+        - EMA50 > EMA200 (골든크로스 구간) + ADX > 20 → 상승 추세 확인
+        - EMA50 < EMA200 (데스크로스 구간) + ADX > 20 → 하락 추세 확인
+        - RSI가 40-70 구간에서 롱, 30-60 구간에서 숏 진입 선호
+
+        이 필터가 발동되면 역방향 신호는 combiner에서 대부분 차단됨.
+        """
+        signals = []
+        try:
+            close = htf_df["close"]
+            high = htf_df["high"]
+            low = htf_df["low"]
+
+            # EMA200(일봉) 기준: 215봉 이상 필요 (EMA 수렴용 워밍업 포함)
+            min_htf_bars = self._s.HTF_EMA_TREND + 15
+            if len(close) < min_htf_bars:
+                return signals
+
+            # ── 4H EMA 계산 ───────────────────────────────────────────────────
+            ef = ema(close, self._s.HTF_EMA_FAST)
+            em = ema(close, self._s.HTF_EMA_MID)
+            es = ema(close, self._s.HTF_EMA_SLOW)
+            et = ema(close, self._s.HTF_EMA_TREND)
+
+            ef_now = float(ef.iloc[-1])
+            em_now = float(em.iloc[-1])
+            es_now = float(es.iloc[-1])
+            et_now = float(et.iloc[-1])
+            price_now = float(close.iloc[-1])
+
+            # ── EMA 정렬 점수 ─────────────────────────────────────────────────
+            # full_bull: 모든 EMA 완전 정렬 (가장 강한 추세)
+            full_bull = ef_now > em_now > es_now > et_now and price_now > ef_now
+            # mild_bull: EMA50 > EMA200 = 불마켓 (EMA9/21 조정 시 중립 방지)
+            # 단기 EMA(EMA9/21) 조정은 불마켓 내 일시적 현상 — EMA200 기준으로만 판단
+            mild_bull = es_now > et_now  # EMA50 > EMA200 = 불마켓
+            full_bear = ef_now < em_now < es_now < et_now and price_now < ef_now
+            mild_bear = es_now < et_now  # EMA50 < EMA200 = 베어마켓
+
+            # ── 4H ADX ────────────────────────────────────────────────────────
+            adx_df_htf = adx(high, low, close, self._s.ADX_PERIOD)
+            htf_adx = float(adx_df_htf["adx"].iloc[-1])
+            htf_plus_di = float(adx_df_htf["plus_di"].iloc[-1])
+            htf_minus_di = float(adx_df_htf["minus_di"].iloc[-1])
+            adx_trending = htf_adx >= self._s.HTF_ADX_THRESHOLD
+            adx_bullish = htf_plus_di > htf_minus_di
+
+            # ── 4H RSI ────────────────────────────────────────────────────────
+            rsi_s = rsi(close, self._s.RSI_PERIOD)
+            htf_rsi = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else 50.0
+
+            # ── EMA 기울기 (5봉 변화율) ────────────────────────────────────────
+            es_prev = float(es.iloc[-6]) if len(es) >= 6 else es_now
+            ema50_slope = (es_now - es_prev) / (abs(es_prev) + 1e-9)
+
+            # ── HTF 방향 결정 ─────────────────────────────────────────────────
+            # 핵심 원칙: EMA50 > EMA200 = 불마켓 (long only), EMA50 < EMA200 = 베어마켓 (short only)
+            # ADX/RSI는 신뢰도를 조정하지만 방향을 반전시키지 않음
+            if full_bull and adx_trending:
+                # 완전 정렬 상승 + ADX 확인 → 최고 신뢰도 롱
+                conf = min(1.0, 0.85 + min(0.15, (htf_adx - 20) / 100))
+                signals.append(Signal(
+                    name="htf_strong_bull",
+                    direction=1,
+                    confidence=conf,
+                    category="htf_trend",
+                ))
+            elif mild_bull:
+                # EMA50 > EMA200 = 불마켓 → 항상 롱 편향 (ADX 조정은 무관)
+                # 단기 EMA 조정(EMA9/21 하락)은 불마켓 내 일시적 현상이므로 무시
+                if adx_trending and adx_bullish:
+                    conf = 0.80  # 추세 확인
+                elif adx_bullish:
+                    conf = 0.65  # DI+ > DI- (상승 방향)
+                else:
+                    conf = 0.55  # 조정 중이지만 불마켓 유지
+                signals.append(Signal(
+                    name="htf_mild_bull",
+                    direction=1,
+                    confidence=conf,
+                    category="htf_trend",
+                ))
+            elif full_bear and adx_trending:
+                # 완전 정렬 하락 + ADX 확인 → 최고 신뢰도 숏
+                conf = min(1.0, 0.85 + min(0.15, (htf_adx - 20) / 100))
+                signals.append(Signal(
+                    name="htf_strong_bear",
+                    direction=-1,
+                    confidence=conf,
+                    category="htf_trend",
+                ))
+            elif mild_bear:
+                # EMA50 < EMA200 = 베어마켓 → 항상 숏 편향
+                if adx_trending and not adx_bullish:
+                    conf = 0.80
+                elif not adx_bullish:
+                    conf = 0.65
+                else:
+                    conf = 0.55  # 조정 중이지만 베어마켓 유지
+                signals.append(Signal(
+                    name="htf_mild_bear",
+                    direction=-1,
+                    confidence=conf,
+                    category="htf_trend",
+                ))
+            else:
+                # EMA50 ≈ EMA200 (교차 전환 구간) → 중립
+                signals.append(Signal(
+                    name="htf_neutral",
+                    direction=0,
+                    confidence=0.15,
+                    category="htf_trend",
+                ))
+
+            # ── RSI 진입 품질 보조 신호 ───────────────────────────────────────
+            # RSI는 동일 방향 신호로만 사용 (역방향 경고 신호 제거 — htf_net 중립화 방지)
+            rsi_ok_for_long = self._s.HTF_RSI_BULL_MIN <= htf_rsi <= self._s.HTF_RSI_BULL_MAX
+            rsi_ok_for_short = self._s.HTF_RSI_BEAR_MIN <= htf_rsi <= self._s.HTF_RSI_BEAR_MAX
+
+            if rsi_ok_for_long and mild_bull:
+                # 불마켓 + RSI 좋은 진입 구간 → 롱 신호 강화
+                signals.append(Signal(
+                    name="htf_rsi_bull_zone",
+                    direction=1,
+                    confidence=0.65,
+                    category="htf_trend",
+                ))
+            elif rsi_ok_for_short and mild_bear:
+                # 베어마켓 + RSI 좋은 진입 구간 → 숏 신호 강화
+                signals.append(Signal(
+                    name="htf_rsi_bear_zone",
+                    direction=-1,
+                    confidence=0.65,
+                    category="htf_trend",
+                ))
+
+        except Exception as e:
+            pass
+
         return signals
 
     # ── ICT Signals ───────────────────────────────────────────────────────────
