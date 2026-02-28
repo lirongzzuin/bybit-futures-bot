@@ -106,14 +106,14 @@ class RiskEngine:
         # ── Signal-driven leverage escalation ─────────────────────────────────
         # 핵심 원리: base_leverage = trade_risk_pct / stop_distance_pct
         #   → 강한 시그널: 타이트 스탑(stop_atr_scale↓) + 높은 리스크%(trade_risk↑)
-        #   → 두 효과가 곱해져 50× 레버리지 자연 달성
+        #   → 두 효과가 곱해져 높은 레버리지 자연 달성
         #
-        # 예시 (BTC, ATR=0.5%, SCALP_STOP=1.5×):
-        #   strength=0.85: stop=0.25×1.5×0.5%=0.1875%, risk=10% → lev=10%/0.1875%=53× ✓
-        #   strength=0.80: stop=0.40×1.5×0.5%=0.3000%, risk= 6% → lev= 6%/0.3000%=20×
-        #   strength=0.75: stop=0.60×1.5×0.5%=0.4500%, risk= 3% → lev= 3%/0.4500%= 7×
-        #   strength=0.65: stop=0.80×1.5×0.5%=0.6000%, risk=2.5%→ lev=2.5%/0.6000%= 4×
-        #   default:       stop=1.00×1.5×0.5%=0.7500%, risk=1.5%→ lev=1.5%/0.7500%= 2×
+        # 실제 ATR=1.0% 기준 예시 (SCALP_STOP=1.2×, 이후 감쇠 ×0.88):
+        #   strength=0.85: stop=0.35×1.2×1.0%=0.42%,  risk=16% → base=38×, 실제≈20×(캡)
+        #   strength=0.80: stop=0.50×1.2×1.0%=0.60%,  risk=12% → base=20×, 실제≈18×
+        #   strength=0.75: stop=0.65×1.2×1.0%=0.78%,  risk= 9% → base=11.5×, 실제≈10×
+        #   strength=0.65: stop=0.80×1.2×1.0%=0.96%,  risk= 6% → base= 6.3×, 실제≈ 5×
+        #   default:       stop=1.00×1.2×1.0%=1.20%,  risk= 4% → base= 3.3×, 실제≈ 2-3×
         # ── Signal-driven risk escalation ─────────────────────────────────────
         # 드로우다운이 높을수록 에스컬레이션 자동 억제 (안전 장치)
         # drawdown_pct > 0.15: 에스컬레이션 비활성화 (기본 risk만 사용)
@@ -121,20 +121,20 @@ class RiskEngine:
 
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
         if signal_strength >= 0.85 and dd_escalation_allowed:
-            stop_atr_scale = 0.40           # 타이트하되 노이즈 고려
-            trade_risk_pct = min(0.10, target_risk * 7.0)   # 최대 10% (13%→10% 안전화)
+            stop_atr_scale = 0.35           # 매우 타이트 스탑 → 최고 레버리지
+            trade_risk_pct = min(0.16, target_risk * 8.0)   # 목표 레버리지: ~20× (캡)
         elif signal_strength >= 0.80 and dd_escalation_allowed:
-            stop_atr_scale = 0.55
-            trade_risk_pct = min(0.06, target_risk * 4.0)   # 최대 6%
+            stop_atr_scale = 0.50
+            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~15-18×
         elif signal_strength >= 0.75 and dd_escalation_allowed:
-            stop_atr_scale = 0.70
-            trade_risk_pct = min(0.03, target_risk * 2.0)   # 최대 3%
+            stop_atr_scale = 0.65
+            trade_risk_pct = min(0.09, target_risk * 4.5)   # 목표 레버리지: ~8-10×
         elif signal_strength >= 0.65:
-            stop_atr_scale = 0.85
-            trade_risk_pct = min(0.025, target_risk * 1.5)  # 최대 2.5%
+            stop_atr_scale = 0.80
+            trade_risk_pct = min(0.06, target_risk * 3.0)   # 목표 레버리지: ~4-5×
         else:
             stop_atr_scale = 1.00
-            trade_risk_pct = target_risk                     # 기본값
+            trade_risk_pct = min(0.04, target_risk * 2.0)   # 기본값: ~2-3×
 
         # ── Step 1: Stop distance (signal-scaled) ─────────────────────────────
         # TP prices는 FULL ATR 배수 사용 → tight stop + large TP = 우수한 R:R

@@ -135,7 +135,9 @@ class TradingBot:
         peak_equity = self._db.get_peak_equity(settings.TRADING_MODE) or equity
 
         # ── 3. Sync positions from exchange every cycle to detect liquidations ──
-        if not settings.is_dry_run():
+        # Paper 모드는 거래소에 실제 포지션이 없으므로 sync 시 모두 청산으로 오감지됨
+        # → live 모드에서만 sync 실행
+        if settings.is_live():
             self._sync_positions(symbols)
 
         # ── 4. Process each symbol ────────────────────────────────────────────
@@ -476,9 +478,10 @@ class TradingBot:
         if order:
             exit_price = order.avg_price or current_price
 
-            # 남은 포지션 정보 캡처 (exit() 호출 전에)
+            # 남은 포지션 정보 캡처 (exit() 호출 전에 — exit()는 레버리지/qty를 초기화함)
             remaining_qty = pos.qty
             entry = pos.entry_price
+            pos_leverage = pos.leverage              # 레버리지 캡처 (exit 후 1로 초기화됨)
             remaining_entry_fee = pos.entry_fee  # partial_exit 후 남은 진입 수수료
 
             pnl = self._state_machine.exit(symbol, exit_price)
@@ -508,18 +511,26 @@ class TradingBot:
                 )
 
             log.info(
-                "Exit %s | reason=%s gross_pnl=%.4f fee=%.4f (entry_fee=%.4f exit_fee=%.4f) net_pnl=%.4f",
-                symbol, reason, pnl, total_fee, remaining_entry_fee, exit_fee, pnl_net,
+                "Exit %s | reason=%s lev=%d× gross_pnl=%.4f fee=%.4f "
+                "(entry_fee=%.4f exit_fee=%.4f) net_pnl=%.4f",
+                symbol, reason, pos_leverage, pnl, total_fee,
+                remaining_entry_fee, exit_fee, pnl_net,
             )
 
             side_str = "Buy" if direction == 1 else "Sell"
-            pnl_pct = pnl_net / (entry * remaining_qty) if entry > 0 and remaining_qty > 0 else 0
+            # PnL%: 실제 투입 증거금(마진) 대비 수익률 계산
+            # margin = notional / leverage → 실제 계좌에서 사용된 자본
+            margin_used = (entry * remaining_qty) / pos_leverage if pos_leverage > 0 else (entry * remaining_qty)
+            pnl_pct = pnl_net / margin_used if margin_used > 0 else 0
             self._slack.send_position_closed(
                 symbol=symbol,
                 side=side_str,
                 reason=reason,
                 pnl=pnl_net,
                 pnl_pct=pnl_pct,
+                entry_price=entry,
+                exit_price=exit_price,
+                leverage=pos_leverage,
             )
 
     # ── Macro Regime ──────────────────────────────────────────────────────────

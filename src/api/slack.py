@@ -140,15 +140,24 @@ class SlackNotifier:
     def send_position_closed(
         self,
         symbol: str,
-        side: str,
+        side: str,          # "Buy" or "Sell" (entry side = position type)
         reason: str,
         pnl: float,
-        pnl_pct: float,
+        pnl_pct: float,     # PnL as % of margin (return on invested capital)
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        leverage: int = 1,
     ) -> None:
         emoji = "🟢" if pnl >= 0 else "🔴"
+        direction = "LONG" if side == "Buy" else "SHORT"
+        price_str = (
+            f" | {entry_price:,.4f}→{exit_price:,.4f}"
+            if entry_price > 0 and exit_price > 0 else ""
+        )
+        lev_str = f" ×{leverage}" if leverage > 1 else ""
         self._send(
-            f"{emoji} *Closed* `{symbol}` {side} | {reason} | "
-            f"PnL={pnl:+.2f} USDT ({pnl_pct:+.2%})"
+            f"{emoji} *Closed* `{symbol}` {direction}{lev_str}{price_str}\n"
+            f"사유: {reason} | PnL={pnl:+.2f} USDT ({pnl_pct:+.2%})"
         )
 
     # ── Risk Alerts ───────────────────────────────────────────────────────────
