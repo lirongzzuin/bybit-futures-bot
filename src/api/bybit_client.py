@@ -395,6 +395,35 @@ class BybitClient:
                 return {}
             raise
 
+    def cancel_all_orders(self, symbol: str, side: Optional[str] = None) -> int:
+        """
+        심볼의 모든 미체결 지정가 주문을 취소한다.
+        side: "Buy" | "Sell" | None (both sides)
+        Returns: 취소된 주문 수
+        """
+        try:
+            open_orders = self.get_open_orders(symbol)
+        except Exception as e:
+            log.warning("cancel_all_orders: get_open_orders failed for %s: %s", symbol, e)
+            return 0
+
+        cancelled = 0
+        for order in open_orders:
+            if side and order.get("side") != side:
+                continue
+            order_id = order.get("orderId")
+            if not order_id:
+                continue
+            try:
+                self.cancel_order(symbol, order_id)
+                cancelled += 1
+                log.debug("Cancelled stale order %s for %s", order_id, symbol)
+            except Exception as e:
+                log.warning("Failed to cancel order %s for %s: %s", order_id, symbol, e)
+        if cancelled:
+            log.info("Cancelled %d stale order(s) for %s (side=%s)", cancelled, symbol, side or "both")
+        return cancelled
+
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         params: Dict[str, Any] = dict(category="linear")
         if symbol:

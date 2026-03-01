@@ -420,7 +420,14 @@ class TestHighLeverageMode:
 
 
 class TestFeeBreakevenCheck:
-    """수수료 손익분기점 체크 테스트 (fee_safety_multiplier=2.0)."""
+    """수수료 손익분기점 체크 테스트.
+
+    진입 주문 유형:
+      - PostOnly(Maker): spread ≤ 0.3% AND signal ≤ 0.90
+        round_trip = 0.020% + 0.020% + 0.040% = 0.080%  → min_tp1 = 0.160%
+      - Market(Taker): spread > 0.3% OR signal > 0.90
+        round_trip = 0.055% + 0.020% + 0.040% = 0.115%  → min_tp1 = 0.230%
+    """
 
     def setup_method(self):
         self.settings = make_settings()
@@ -444,40 +451,84 @@ class TestFeeBreakevenCheck:
         defaults.update(kwargs)
         return self.engine.calculate(**defaults)
 
+    # ── PostOnly(Maker) 진입 경로 ─────────────────────────────────────────────
+
     def test_sufficient_atr_passes_fee_check(self):
-        """ATR이 충분히 크면 수수료 손익분기점 통과."""
-        # ATR=0.15% (0.0015×entry=75)이면 SCALP TP1=0.225% > fee×2.0=0.160% ✓
-        result = self._calc(atr=75.0)  # 75/50000 = 0.15%
+        """ATR이 충분히 크면 수수료 손익분기점 통과 (PostOnly 진입)."""
+        # ATR=0.15%, SCALP TP1=0.225% > min_tp1=0.160% ✓
+        result = self._calc(atr=75.0)
         assert result.risk_ok, f"Should pass: {result.reason}"
 
     def test_low_atr_fails_fee_check(self):
-        """ATR이 너무 작으면(0.05%) 수수료 손익분기점 미달로 거부."""
-        # ATR=0.05% → SCALP TP1=0.075% < fee×2.0=0.160% → 거부
+        """ATR이 너무 작으면(0.05%) 수수료 손익분기점 미달로 거부 (PostOnly 진입)."""
         result = self._calc(atr=25.0)  # 25/50000 = 0.05%
         assert not result.risk_ok
         assert "수수료" in result.reason
 
     def test_boundary_atr_fails_fee_check(self):
-        """경계값(ATR=0.107%)에서 수수료 체크 작동 확인."""
-        # SCALP: TP1_ATR=1.5, round_trip_fee=0.080%, safety=2.0
-        # min ATR = round_trip_fee * 2.0 / SCALP_TP1_ATR = 0.160% / 1.5 = 0.1067%
-        # ATR = 0.106% → TP1 = 0.159% < 0.160% → 거부
-        result = self._calc(atr=53.0)  # 53/50000 = 0.106%
+        """경계값(ATR=0.106%) 에서 수수료 체크 작동 확인 (PostOnly 진입)."""
+        # min ATR = round_trip(0.080%)×2 / TP1_ATR(1.5) = 0.160%/1.5 = 0.1067%
+        # ATR=0.106% → TP1=0.159% < 0.160% → 거부
+        result = self._calc(atr=53.0)
         assert not result.risk_ok
 
     def test_trend_mode_atr_check(self):
         """TREND_RIDE 모드에서도 수수료 체크 통과."""
-        # TREND TP1=3.0ATR, ATR=0.10% → TP1=0.30% > fee×2.0=0.160% ✓
-        result = self._calc(atr=50.0, trade_mode="TREND_RIDE")  # 50/50000=0.10%
+        # TREND TP1=3.0ATR, ATR=0.10% → TP1=0.30% > 0.160% ✓
+        result = self._calc(atr=50.0, trade_mode="TREND_RIDE")
         assert result.risk_ok
 
-    def test_fee_check_uses_maker_rate(self):
-        """수수료 체크는 Maker 기준 (0.020%×2+slip×2=0.080%)."""
-        # round_trip = MAKER×2 + SLIP×2 = 0.040% + 0.040% = 0.080%
-        # safety_mult = 2.0 → min_tp1 = 0.160%
-        # ATR=0.108% → TP1=0.162% > 0.160% ✓ (just over threshold)
-        result = self._calc(atr=54.0)  # 54/50000 = 0.108%
+    def test_fee_check_uses_maker_rate_for_postonly(self):
+        """PostOnly 진입: Maker 수수료 기준 손익분기점."""
+        # round_trip = MAKER + MAKER + SLIP×2 = 0.020%+0.020%+0.040% = 0.080%
+        # min_tp1 = 0.160%, ATR=0.108% → TP1=0.162% > 0.160% ✓
+        result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.7)
         assert result.risk_ok
+
+    # ── Market(Taker) 진입 경로 ───────────────────────────────────────────────
+
+    def test_wide_spread_uses_taker_fee_in_breakeven(self):
+        """스프레드 > SPREAD_TAKER_THRESHOLD → 시장가 진입 → Taker 수수료 적용."""
+        # round_trip = TAKER + MAKER + SLIP×2 = 0.055%+0.020%+0.040% = 0.115%
+        # min_tp1 = 0.230%
+        # ATR=0.15% → TP1=0.225% < 0.230% → 스프레드 넓은 경우 더 엄격하게 거부
+        result = self._calc(atr=75.0, spread_pct=0.004)  # 0.4% > threshold
+        assert not result.risk_ok, "넓은 스프레드에서 ATR 0.15%는 Taker 수수료 기준으로 미달"
+        assert "수수료" in result.reason
+
+    def test_wide_spread_high_atr_passes_taker_breakeven(self):
+        """스프레드 넓어도 ATR이 충분히 크면 Taker 기준 손익분기점 통과."""
+        # round_trip = 0.115%, min_tp1 = 0.230%
+        # ATR=0.16% → TP1=0.240% > 0.230% ✓
+        result = self._calc(atr=80.0, spread_pct=0.004)
+        assert result.risk_ok, f"Should pass with ATR=0.16%: {result.reason}"
+
+    def test_urgent_signal_uses_taker_fee_in_breakeven(self):
+        """긴급 신호(> 0.90) → 시장가 진입 → Taker 수수료 적용."""
+        # round_trip = 0.115%, min_tp1 = 0.230%
+        # ATR=0.15% → TP1=0.225% < 0.230% → 긴급 신호에서 더 엄격하게 거부
+        result = self._calc(atr=75.0, signal_strength=0.91, spread_pct=0.001)
+        assert not result.risk_ok, "긴급 신호에서 ATR 0.15%는 Taker 수수료 기준으로 미달"
+
+    def test_maker_vs_taker_breakeven_difference(self):
+        """PostOnly vs Market 수수료 차이가 손익분기점에 영향을 미침."""
+        # ATR=0.15%, SCALP TP1=0.225%:
+        #   PostOnly(Maker): 0.225% > min_tp1=0.160% ✓ (통과)
+        #   Market(Taker):   0.225% < min_tp1=0.230% ✗ (거부)
+        maker_result = self._calc(atr=75.0, spread_pct=0.001, signal_strength=0.7)
+        taker_result = self._calc(atr=75.0, spread_pct=0.004, signal_strength=0.7)
+        assert maker_result.risk_ok, "PostOnly 진입: 통과 예상"
+        assert not taker_result.risk_ok, "Market 진입: 더 엄격한 기준으로 거부 예상"
+
+    def test_signal_at_threshold_uses_maker(self):
+        """신호 강도 정확히 0.90 → PostOnly(Maker), 0.90 초과 시에만 Market."""
+        # signal=0.90: NOT > 0.90 → Maker fee
+        maker_result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.90)
+        # signal=0.91: > 0.90 → Taker fee
+        taker_result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.91)
+        # ATR=0.108%: Maker 기준 통과(0.162%>0.160%), Taker 기준 거부(0.162%<0.230%)
+        assert maker_result.risk_ok, "signal=0.90: PostOnly(Maker) 기준 통과"
+        assert not taker_result.risk_ok, "signal=0.91: Market(Taker) 기준 거부"
 
 
 class TestStateMachineFeeTracking:

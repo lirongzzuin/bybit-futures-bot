@@ -101,6 +101,14 @@ class OrderManager:
                 log.error("Failed to init position mode/leverage for %s: %s", symbol, e)
                 return None
 
+            # ── 미체결 지정가 주문 정리 ────────────────────────────────────────
+            # 이전 세션의 잔류 주문 또는 미체결 PostOnly 주문이 쌓이지 않도록
+            # 진입 전 동일 심볼·방향의 미체결 주문을 모두 취소
+            try:
+                self._client.cancel_all_orders(symbol, side=side)
+            except Exception as e:
+                log.warning("Pre-entry order cleanup failed for %s: %s", symbol, e)
+
         # ── positionIdx for hedge mode ─────────────────────────────────────────
         # Bybit hedge mode: 1 = long side, 2 = short side, 0 = one-way (default)
         if self._s.BYBIT_HEDGE_MODE:
@@ -109,9 +117,11 @@ class OrderManager:
             position_idx = 0
 
         # ── Choose order type ─────────────────────────────────────────────────
+        # 스프레드 > 임계값 또는 신호 강도 매우 높음 → 시장가(즉시 체결)
+        # 그 외 → PostOnly 지정가(Maker 수수료 보장, 체결 안 되면 시장가 폴백)
         use_market = (
             spread_pct > self._s.SPREAD_TAKER_THRESHOLD or
-            signal_strength > 0.90  # very urgent signal
+            signal_strength > self._s.SIGNAL_URGENT_THRESHOLD  # configurable urgency
         )
 
         managed = ManagedOrder(
@@ -126,8 +136,9 @@ class OrderManager:
         if use_market:
             success = self._place_market(managed, current_price, symbol_info)
         else:
+            # PostOnly 지정가: Maker 수수료 보장, 즉시체결(Taker) 시도 시 취소 → 시장가 폴백
             success = self._place_limit_with_retry(
-                managed, current_price, symbol_info, direction
+                managed, current_price, symbol_info, direction, use_postonly=True
             )
 
         if success:
@@ -165,6 +176,15 @@ class OrderManager:
         if client_id in self._sent_ids:
             log.warning("Duplicate exit order prevented for %s", symbol)
             return self._orders.get(client_id)
+
+        # ── 청산 전 미체결 지정가 주문 정리 ────────────────────────────────────
+        # 이전 사이클에서 미체결된 청산 주문(TP 지정가 등)이 누적되지 않도록 취소
+        # 손절(STOP_LOSS/GUARD)은 즉시 처리 필요하므로 주문 취소 후 즉시 진행
+        if not self._s.is_dry_run():
+            try:
+                self._client.cancel_all_orders(symbol, side=side)
+            except Exception as e:
+                log.warning("Pre-exit order cleanup failed for %s: %s", symbol, e)
 
         # STOP_LOSS, GUARD*, LIQUIDATION* → Market (즉각 실행 필요)
         # TRAILING_STOP, TAKE_PROFIT, TIME_EXIT, REGIME_CHANGE, SIGNAL_FLIP → Limit (Maker fee)
@@ -212,6 +232,11 @@ class OrderManager:
         self, managed: ManagedOrder, current_price: float, symbol_info: dict,
         is_close: bool = False,
     ) -> bool:
+        # ── 항상 order_type을 "Market"으로 설정 ──────────────────────────────
+        # PostOnly 폴백 등으로 호출될 때 order_type이 "Limit"으로 남아
+        # main.py에서 Maker 수수료로 오계산되는 버그 방지
+        managed.order_type = "Market"
+
         if self._s.is_dry_run():
             managed.status = OrderStatus.FILLED
             managed.avg_price = current_price
@@ -298,12 +323,32 @@ class OrderManager:
         symbol_info: dict,
         direction: int,
         is_close: bool = False,
+        use_postonly: bool = False,
     ) -> bool:
+        """
+        지정가 주문 배치 (재시도 포함).
+
+        use_postonly=True (진입 전용):
+          PostOnly로 Maker 수수료 보장. PostOnly가 즉시 취소(=Taker 방지)되거나
+          오류 발생 시 새 client_id로 시장가 즉시 폴백.
+          재시도 시마다 새 client_id 사용 → 취소된 PostOnly ID 재사용(110072) 방지.
+
+        use_postonly=False (청산 기본):
+          GTC 사용. 청산은 체결 신뢰성이 수수료보다 중요하므로 GTC 유지.
+        """
         timeout = self._s.LIMIT_ORDER_TIMEOUT_SECONDS
         max_retries = self._s.LIMIT_ORDER_MAX_RETRIES
+        tif = "PostOnly" if use_postonly else "GTC"
 
         for attempt in range(1, max_retries + 1):
             managed.attempts = attempt
+
+            # PostOnly 재시도 시 새 client_id 사용 (취소된 주문 ID 재사용 → 110072 방지)
+            if use_postonly and attempt > 1:
+                managed.client_id = self._make_client_id(
+                    managed.symbol, managed.side, f"retry-{attempt}-{int(time.time())}"
+                )
+
             # Quote at current best
             offset = symbol_info.get("price_step", 0.01)
             if direction == 1:
@@ -318,8 +363,8 @@ class OrderManager:
                 managed.status = OrderStatus.FILLED
                 managed.avg_price = float(price_str)
                 managed.filled_qty = float(managed.qty)
-                log.info("[DRY-RUN] Limit %s %s qty=%s @ %s",
-                         managed.side, managed.symbol, managed.qty, price_str)
+                log.info("[DRY-RUN] %s %s %s qty=%s @ %s",
+                         tif, managed.side, managed.symbol, managed.qty, price_str)
                 return True
 
             try:
@@ -329,10 +374,7 @@ class OrderManager:
                     qty=managed.qty,
                     order_type="Limit",
                     price=price_str,
-                    time_in_force="GTC",  # PostOnly 대신 GTC: 즉시 체결 허용(Taker 포함)
-                    # PostOnly는 즉시 체결 시 거부 → Cancelled → 동일 client_id로 Market 시도
-                    # → 110072 오류 → 취소된 주문을 체결로 오판 → 유령 포지션 발생
-                    # GTC는 항상 체결됨(메이커 or 테이커), 폴백 시 새 client_id 사용
+                    time_in_force=tif,
                     client_order_id=managed.client_id,
                     position_idx=managed.position_idx,
                 )
@@ -340,9 +382,7 @@ class OrderManager:
                 managed.status = OrderStatus.PENDING
             except BybitAPIError as e:
                 if e.code == 110072:
-                    # orderLinkId already used — the previous attempt succeeded on
-                    # Bybit's side but we didn't receive the confirmation.  Look up
-                    # the existing order and continue waiting for fill.
+                    # orderLinkId already used — look up the existing order
                     log.info(
                         "Duplicate orderLinkId %s — fetching existing order from exchange",
                         managed.client_id,
@@ -351,16 +391,41 @@ class OrderManager:
                         managed.symbol, managed.client_id
                     )
                     if existing:
-                        managed.exchange_id = existing.get("orderId")
-                        managed.status = OrderStatus.PENDING
-                        # Fall through to _wait_for_fill below (no continue)
+                        order_status = existing.get("orderStatus", "")
+                        if order_status == "Filled":
+                            log.info(
+                                "%s order %s already filled (110072) — treating as success",
+                                tif, managed.client_id,
+                            )
+                            managed.exchange_id = existing.get("orderId")
+                            managed.status = OrderStatus.FILLED
+                            managed.avg_price = float(existing.get("avgPrice", current_price) or current_price)
+                            managed.price = str(managed.avg_price)
+                            return True
+                        else:
+                            # Cancelled/Rejected 주문과 linkId 충돌
+                            log.warning(
+                                "Order %s exists with status=%s (not Filled) — NOT treating as position open",
+                                managed.client_id, order_status,
+                            )
+                            managed.status = OrderStatus.FAILED
+                            if use_postonly:
+                                # PostOnly: 즉시 시장가 폴백
+                                log.info("PostOnly 110072 non-Filled → market fallback for %s", managed.symbol)
+                                managed.client_id = self._make_client_id(
+                                    managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                                )
+                                return self._place_market(managed, current_price, symbol_info, is_close=is_close)
+                            return False
                     else:
-                        log.warning(
-                            "Could not find order with linkId %s — giving up this attempt",
-                            managed.client_id,
-                        )
+                        log.warning("110072 but no existing order found for %s — FAILED", managed.client_id)
+                        managed.status = OrderStatus.FAILED
+                        if use_postonly:
+                            managed.client_id = self._make_client_id(
+                                managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                            )
+                            return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                         if attempt == max_retries:
-                            log.info("Falling back to market order for %s", managed.symbol)
                             managed.client_id = self._make_client_id(
                                 managed.symbol, managed.side, f"mkt-{int(time.time())}"
                             )
@@ -377,7 +442,14 @@ class OrderManager:
                     managed.price = str(current_price)
                     return True
                 else:
-                    log.warning("Limit order attempt %d failed: %s", attempt, e)
+                    log.warning("%s order attempt %d failed: %s", tif, attempt, e)
+                    if use_postonly:
+                        # PostOnly 오류(거부 등) → 즉시 시장가 폴백
+                        log.info("PostOnly error → market fallback for %s", managed.symbol)
+                        managed.client_id = self._make_client_id(
+                            managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                        )
+                        return self._place_market(managed, current_price, symbol_info, is_close=is_close)
                     if attempt == max_retries:
                         log.info("Falling back to market order for %s", managed.symbol)
                         managed.client_id = self._make_client_id(
@@ -391,19 +463,30 @@ class OrderManager:
             if fill_result:
                 return True
 
-            # Not filled — cancel and re-quote
+            # Not filled — cancel before re-quote or fallback
             if managed.exchange_id:
                 try:
                     self._client.cancel_order(managed.symbol, managed.exchange_id)
                     log.info(
-                        "Limit order timed out, re-quoting %s (attempt %d/%d)",
-                        managed.symbol, attempt, max_retries,
+                        "%s order timed out, re-quoting %s (attempt %d/%d)",
+                        tif, managed.symbol, attempt, max_retries,
                     )
                 except Exception:
                     pass
 
+            # PostOnly가 즉시 취소됨(=Taker 주문 시도) → 시장가 폴백
+            if use_postonly and managed.status == OrderStatus.CANCELLED:
+                log.info(
+                    "PostOnly cancelled for %s (would-be Taker) → market fallback",
+                    managed.symbol,
+                )
+                managed.client_id = self._make_client_id(
+                    managed.symbol, managed.side, f"mkt-{int(time.time())}"
+                )
+                return self._place_market(managed, current_price, symbol_info, is_close=is_close)
+
             if attempt == max_retries:
-                # Market fallback: 새 client_id 생성하여 GTC 취소된 ID 재사용 방지
+                # 최종 시장가 폴백: 새 client_id 생성하여 취소된 ID 재사용 방지
                 managed.client_id = self._make_client_id(
                     managed.symbol, managed.side, f"mkt-{int(time.time())}"
                 )

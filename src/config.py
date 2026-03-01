@@ -118,6 +118,8 @@ class Settings(BaseSettings):
     LIMIT_ORDER_MAX_RETRIES: int = 3
     REENTRY_COOLDOWN_SECONDS: int = 900        # 15 min = 1 full bar on 15m timeframe
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
+    # 신호 강도가 이 값 초과 시 지정가 대신 시장가(즉시 체결 우선)
+    SIGNAL_URGENT_THRESHOLD: float = 0.90  # > 0.90 → market order (urgency)
 
     # ── Backtest ─────────────────────────────────────────────
     BACKTEST_START: str = ""               # ISO date; empty = 5 years ago

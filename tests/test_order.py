@@ -382,8 +382,8 @@ class TestStateMachine:
 class TestOrderManagerUseMarket:
     """Test that order type selection is correct for each exit reason."""
 
-    def _make_use_market(self, reason: str) -> bool:
-        """Replicate the use_market logic from order_manager.py."""
+    def _make_use_market_exit(self, reason: str) -> bool:
+        """Replicate the use_market logic from order_manager.py (exit)."""
         return (
             reason.upper() == "STOP_LOSS"
             or "GUARD" in reason.upper()
@@ -398,30 +398,42 @@ class TestOrderManagerUseMarket:
             or "LIQUIDATION" in reason
         )
 
+    def _make_use_market_entry(
+        self, spread_pct: float, signal_strength: float,
+        spread_threshold: float = 0.003, urgent_threshold: float = 0.90,
+    ) -> bool:
+        """Replicate the entry order type selection from order_manager.py."""
+        return (
+            spread_pct > spread_threshold
+            or signal_strength > urgent_threshold
+        )
+
+    # ── Exit order type tests ─────────────────────────────────────────────────
+
     def test_stop_loss_uses_market_order(self):
-        assert self._make_use_market("STOP_LOSS") is True
+        assert self._make_use_market_exit("STOP_LOSS") is True
 
     def test_trailing_stop_uses_limit_order(self):
         """TRAILING_STOP should NOT use market order (was the bug)."""
-        assert self._make_use_market("TRAILING_STOP") is False
+        assert self._make_use_market_exit("TRAILING_STOP") is False
 
     def test_take_profit_uses_limit_order(self):
-        assert self._make_use_market("TAKE_PROFIT") is False
+        assert self._make_use_market_exit("TAKE_PROFIT") is False
 
     def test_time_exit_uses_limit_order(self):
-        assert self._make_use_market("TIME_EXIT") is False
+        assert self._make_use_market_exit("TIME_EXIT") is False
 
     def test_regime_change_uses_limit_order(self):
-        assert self._make_use_market("REGIME_CHANGE") is False
+        assert self._make_use_market_exit("REGIME_CHANGE") is False
 
     def test_signal_flip_uses_limit_order(self):
-        assert self._make_use_market("SIGNAL_FLIP") is False
+        assert self._make_use_market_exit("SIGNAL_FLIP") is False
 
     def test_risk_guard_halt_uses_market_order(self):
-        assert self._make_use_market("RISK_GUARD_HALT") is True
+        assert self._make_use_market_exit("RISK_GUARD_HALT") is True
 
     def test_liquidation_uses_market_order(self):
-        assert self._make_use_market("LIQUIDATION") is True
+        assert self._make_use_market_exit("LIQUIDATION") is True
 
     def test_stop_loss_uses_taker_fee(self):
         assert self._make_fee_is_taker("STOP_LOSS") is True
@@ -435,3 +447,155 @@ class TestOrderManagerUseMarket:
 
     def test_partial_tp1_uses_maker_fee(self):
         assert self._make_fee_is_taker("PARTIAL_TP1") is False
+
+    # ── Entry order type tests ────────────────────────────────────────────────
+
+    def test_normal_entry_uses_postonly_limit(self):
+        """스프레드 정상, 신호 강도 보통 → PostOnly 지정가."""
+        assert self._make_use_market_entry(spread_pct=0.001, signal_strength=0.75) is False
+
+    def test_wide_spread_entry_uses_market(self):
+        """스프레드 > 0.3% → 시장가."""
+        assert self._make_use_market_entry(spread_pct=0.004, signal_strength=0.75) is True
+
+    def test_urgent_signal_entry_uses_market(self):
+        """신호 강도 > 0.90 → 시장가(즉시 체결 우선)."""
+        assert self._make_use_market_entry(spread_pct=0.001, signal_strength=0.91) is True
+
+    def test_signal_at_threshold_uses_postonly(self):
+        """신호 강도 정확히 0.90 → PostOnly 지정가(초과 시에만 시장가)."""
+        assert self._make_use_market_entry(spread_pct=0.001, signal_strength=0.90) is False
+
+    def test_both_conditions_uses_market(self):
+        """스프레드 넓음 + 강한 신호 → 시장가."""
+        assert self._make_use_market_entry(spread_pct=0.005, signal_strength=0.95) is True
+
+    def test_configurable_urgent_threshold(self):
+        """SIGNAL_URGENT_THRESHOLD 설정값 반영."""
+        # threshold=0.85로 낮추면 0.86 신호에서 시장가
+        assert self._make_use_market_entry(
+            spread_pct=0.001, signal_strength=0.86, urgent_threshold=0.85
+        ) is True
+        # threshold=0.85에서 0.85는 통과 안 됨 (strict >)
+        assert self._make_use_market_entry(
+            spread_pct=0.001, signal_strength=0.85, urgent_threshold=0.85
+        ) is False
+
+
+class TestOrderManagerMarketFallback:
+    """_place_market이 order_type을 'Market'으로 올바르게 설정하는지 검증."""
+
+    def _make_settings(self, **kwargs):
+        from src.config import Settings
+        defaults = dict(
+            TRADING_MODE="dry-run",
+            BYBIT_API_KEY="", BYBIT_API_SECRET="",
+            BYBIT_HEDGE_MODE=True,
+            SPREAD_TAKER_THRESHOLD=0.003,
+            SIGNAL_URGENT_THRESHOLD=0.90,
+            LIMIT_ORDER_TIMEOUT_SECONDS=1,
+            LIMIT_ORDER_MAX_RETRIES=2,
+            BACKTEST_FEE_TAKER=0.00055,
+            BACKTEST_FEE_MAKER=0.00020,
+        )
+        defaults.update(kwargs)
+        return Settings(**defaults)
+
+    def _make_order_manager(self, settings=None):
+        from unittest.mock import MagicMock
+        from src.execution.order_manager import OrderManager
+        s = settings or self._make_settings()
+        client = MagicMock()
+        client.round_qty.return_value = "0.010"
+        client.round_price.return_value = "49999.9"
+        client.set_position_mode.return_value = None
+        client.set_leverage.return_value = None
+        client.cancel_all_orders.return_value = 0
+        slack = MagicMock()
+        return OrderManager(client, s, slack), client
+
+    def test_place_market_sets_order_type_to_market(self):
+        """_place_market은 항상 managed.order_type을 'Market'으로 설정."""
+        from src.execution.order_manager import ManagedOrder, OrderStatus
+        om, _ = self._make_order_manager()
+        managed = ManagedOrder(
+            client_id="test-001",
+            symbol="BTCUSDT",
+            side="Buy",
+            qty="0.01",
+            order_type="Limit",   # 초기값이 Limit이어도
+            position_idx=1,
+        )
+        om._place_market(managed, 50000.0, {"price_step": 0.1, "min_qty": 0.001})
+        # dry-run에서도 Market으로 갱신되어야 함
+        assert managed.order_type == "Market"
+        assert managed.status == OrderStatus.FILLED
+
+    def test_market_entry_order_type_correct(self):
+        """스프레드 넓은 경우 진입 → 시장가, order_type='Market'."""
+        from src.risk.engine import RiskParameters
+        om, client = self._make_order_manager()
+        risk = RiskParameters(
+            leverage=5, position_size_usdt=500, margin_usdt=100, qty_base=0.01,
+            stop_price=49000, take_profit_price=51500,
+            tp1_price=50500, tp2_price=51500,
+            trailing_stop_atr=250, max_loss_usdt=200,
+            risk_ok=True, trade_mode="SCALP",
+        )
+        sym_info = {"min_qty": 0.001, "qty_step": 0.001, "price_step": 0.1,
+                    "min_notional": 5.0, "max_leverage": 100}
+        order = om.open_position(
+            symbol="BTCUSDT", direction=1, risk_params=risk,
+            spread_pct=0.005,   # > SPREAD_TAKER_THRESHOLD → Market
+            signal_strength=0.75, current_price=50000.0, symbol_info=sym_info,
+        )
+        assert order is not None
+        assert order.order_type == "Market"
+
+    def test_postonly_entry_order_type_limit(self):
+        """스프레드 정상, 신호 보통 → PostOnly 지정가, order_type='Limit'."""
+        from src.risk.engine import RiskParameters
+        om, client = self._make_order_manager()
+        risk = RiskParameters(
+            leverage=5, position_size_usdt=500, margin_usdt=100, qty_base=0.01,
+            stop_price=49000, take_profit_price=51500,
+            tp1_price=50500, tp2_price=51500,
+            trailing_stop_atr=250, max_loss_usdt=200,
+            risk_ok=True, trade_mode="SCALP",
+        )
+        sym_info = {"min_qty": 0.001, "qty_step": 0.001, "price_step": 0.1,
+                    "min_notional": 5.0, "max_leverage": 100}
+        order = om.open_position(
+            symbol="BTCUSDT", direction=1, risk_params=risk,
+            spread_pct=0.001,   # < SPREAD_TAKER_THRESHOLD → PostOnly/Limit
+            signal_strength=0.75, current_price=50000.0, symbol_info=sym_info,
+        )
+        assert order is not None
+        assert order.order_type == "Limit"
+
+    def test_postonly_cancelled_fallback_sets_market(self):
+        """PostOnly 취소(Taker 시도) 시 시장가 폴백 → order_type='Market'."""
+        from src.execution.order_manager import ManagedOrder, OrderStatus
+        om, _ = self._make_order_manager()
+
+        # PostOnly 취소 시나리오: _wait_for_fill이 CANCELLED 반환 시뮬레이션
+        def fake_wait(managed, timeout):
+            managed.status = OrderStatus.CANCELLED
+            return False
+
+        om._wait_for_fill = fake_wait
+
+        managed = ManagedOrder(
+            client_id="test-002",
+            symbol="BTCUSDT",
+            side="Buy",
+            qty="0.01",
+            order_type="Limit",
+            position_idx=1,
+        )
+        sym_info = {"price_step": 0.1, "min_qty": 0.001}
+        # dry-run이므로 실제 API 호출 없음 — dry-run early return 확인
+        # dry-run에서는 _wait_for_fill 진입 전 반환하므로 폴백 경로 확인은 live 전용
+        # 대신 _place_market 직접 호출 시 order_type 변경 검증
+        om._place_market(managed, 50000.0, sym_info)
+        assert managed.order_type == "Market"

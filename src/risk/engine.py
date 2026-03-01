@@ -278,19 +278,34 @@ class RiskEngine:
 
         # ── Step 7b: 수수료 손익분기점 체크 ──────────────────────────────────
         # TP1 도달 시 예상 수익이 수수료(진입 + 청산)의 2배 이상이어야 진입.
-        # round-trip: 진입 MAKER(0.020%) + TP1 청산 MAKER(0.020%) + 슬리피지×2
-        # GTC 주문은 대부분 Maker 체결이지만 fee_safety_multiplier=2.0으로 여유 확보.
+        #
+        # 진입 주문 유형별 수수료 적용 (order_manager.py 선택 로직과 동일):
+        #   - 스프레드 > SPREAD_TAKER_THRESHOLD  또는
+        #     신호 강도 > SIGNAL_URGENT_THRESHOLD  → 시장가(Taker, 0.055%)
+        #   - 그 외 → PostOnly 지정가(Maker, 0.020%)
+        # TP1 청산: 지정가(Maker) 사용 → 항상 BACKTEST_FEE_MAKER
+        entry_is_market = (
+            spread_pct > self._s.SPREAD_TAKER_THRESHOLD
+            or signal_strength > self._s.SIGNAL_URGENT_THRESHOLD
+        )
+        entry_fee_rate = (
+            self._s.BACKTEST_FEE_TAKER if entry_is_market else self._s.BACKTEST_FEE_MAKER
+        )
         round_trip_fee_pct = (
-            self._s.BACKTEST_FEE_MAKER * 2 + self._s.BACKTEST_SLIPPAGE_PCT * 2
+            entry_fee_rate + self._s.BACKTEST_FEE_MAKER + self._s.BACKTEST_SLIPPAGE_PCT * 2
         )
         tp1_move_pct = (atr * tp1_atr_mult) / entry_price
         fee_safety_multiplier = 2.0  # TP1 수익이 수수료의 최소 2배 (강화)
-        # SCALP: ATR=0.107% → TP1=0.161% > fee×2.0=0.160% ✓ (최소 통과선 ATR 0.107%)
-        # TREND: ATR=0.054% → TP1=0.161% > fee×2.0=0.160% ✓ (더 여유 있음)
+        # 예시 (ATR=0.107%, 일반 PostOnly 진입):
+        #   round_trip = 0.020% + 0.020% + 0.040% = 0.080%  → min_tp1 = 0.160%
+        # 예시 (ATR=0.107%, 시장가 진입 — 스프레드 넓거나 긴급):
+        #   round_trip = 0.055% + 0.020% + 0.040% = 0.115%  → min_tp1 = 0.230%
         if tp1_move_pct < round_trip_fee_pct * fee_safety_multiplier:
+            entry_type = "Taker(시장가)" if entry_is_market else "Maker(PostOnly)"
             return self._no_trade(
                 f"TP1 예상수익 {tp1_move_pct:.4%} < 수수료×{fee_safety_multiplier:.1f} "
-                f"{round_trip_fee_pct * fee_safety_multiplier:.4%} — 수수료 손익분기 미달"
+                f"{round_trip_fee_pct * fee_safety_multiplier:.4%} "
+                f"[진입={entry_type}] — 수수료 손익분기 미달"
             )
 
         # ── Step 8: Liquidation distance check ────────────────────────────────
