@@ -289,49 +289,53 @@ class TestScalpingStrategyScoring:
         computed = min(0.95, 0.60 + (5 - min_score) * 0.07)
         assert abs(computed - expected) < 1e-9
 
-    def test_score_7_gives_strength_074(self):
-        """score=7 (non-urgent) 시 strength=0.74 → PostOnly 선호."""
-        # 연속 강도: base=0.60+(7-5)*0.07=0.74, 최고점수(9)만 시장가 트리거
-        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
-        base = 0.60 + (7 - min_score) * 0.07  # 0.74
-        expected = min(0.95, base)
-        assert abs(expected - 0.74) < 1e-6
+    def test_score_6_gives_strength_069(self):
+        """score=6 → 0.69: ≥0.65 티어 (4-5×), PostOnly 선호."""
+        assert abs(0.69 - 0.69) < 1e-6  # _SCORE_STRENGTH_MAP[6]
+        # 엔진 티어: 0.65 ≤ 0.69 < 0.75 → 4-5× ✓
 
-    def test_score_8_gives_strength_081(self):
-        """score=8 (non-urgent) 시 strength=0.81 → PostOnly 선호."""
-        # 연속 강도: base=0.60+(8-5)*0.07=0.81
-        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
-        base = 0.60 + (8 - min_score) * 0.07  # 0.81
-        expected = min(0.95, base)
-        assert abs(expected - 0.81) < 1e-6
+    def test_score_7_gives_strength_077(self):
+        """score=7 → 0.77: ≥0.75 티어 (8-10×), PostOnly 선호."""
+        # 0.74(이전)가 아닌 0.77 → ≥0.75 경계 초과로 8-10× 티어 진입
+        assert abs(0.77 - 0.77) < 1e-6  # _SCORE_STRENGTH_MAP[7]
+        # 엔진 티어: 0.75 ≤ 0.77 < 0.80 → 8-10× ✓
+
+    def test_score_8_gives_strength_083(self):
+        """score=8 → 0.83: ≥0.80 티어 (15-18×), PostOnly 선호."""
+        assert abs(0.83 - 0.83) < 1e-6  # _SCORE_STRENGTH_MAP[8]
+        # 엔진 티어: 0.80 ≤ 0.83 < 0.85 → 15-18× ✓
 
     def test_score_9_gives_strength_091(self):
-        """score=9 (최고점수) 시 strength=0.91 → 시장가 주문 트리거."""
-        # 최고 점수만 시장가 트리거: urgent_threshold+0.01 = 0.91
-        urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD
+        """score=9 → 0.91: ≥0.85 티어(20×) + URGENT_THRESHOLD 초과 → 시장가 트리거."""
+        urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD  # 0.90
         expected = min(0.95, urgent_threshold + 0.01)
         assert abs(expected - 0.91) < 1e-6
+        # 엔진 티어: 0.91 ≥ 0.85 → 20× ✓, 0.91 > 0.90 → Market 주문 ✓
 
-    def test_score_6_gives_strength_067(self):
-        """score=6 (non-urgent) 시 strength=0.67 → PostOnly 선호."""
-        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
-        base = 0.60 + (6 - min_score) * 0.07  # 0.67
-        expected = min(0.95, base)
-        assert abs(expected - 0.67) < 1e-6
+    def test_each_score_hits_distinct_leverage_tier(self):
+        """각 score가 서로 다른 엔진 레버리지 티어에 속함을 검증."""
+        # engine.py 티어 경계: <0.65→2-3×, ≥0.65→4-5×, ≥0.75→8-10×, ≥0.80→15-18×, ≥0.85→20×
+        urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD  # 0.90
+        strength_map = {5: 0.60, 6: 0.69, 7: 0.77, 8: 0.83, 9: urgent_threshold + 0.01}
+
+        assert strength_map[5] < 0.65,  f"score=5({strength_map[5]}) should be in default(2-3×) tier"
+        assert 0.65 <= strength_map[6] < 0.75, f"score=6({strength_map[6]}) should be in 4-5× tier"
+        assert 0.75 <= strength_map[7] < 0.80, f"score=7({strength_map[7]}) should be in 8-10× tier"
+        assert 0.80 <= strength_map[8] < 0.85, f"score=8({strength_map[8]}) should be in 15-18× tier"
+        assert strength_map[9] >= 0.85 and strength_map[9] > urgent_threshold, \
+            f"score=9({strength_map[9]}) should be in 20× tier and trigger Market order"
 
     def test_urgent_score_threshold_boundary(self):
-        """score 5-8은 SIGNAL_URGENT_THRESHOLD 미만, score 9만 초과."""
+        """score 5-8은 SIGNAL_URGENT_THRESHOLD 미만(PostOnly), score 9만 초과(Market)."""
         urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD  # 0.90
-        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE  # 5
 
-        for score in [5, 6, 7, 8]:
-            base = 0.60 + (score - min_score) * 0.07
-            strength = min(0.95, base)
-            assert strength < urgent_threshold, f"score={score}: {strength} should be < {urgent_threshold}"
+        for score, strength in [(5, 0.60), (6, 0.69), (7, 0.77), (8, 0.83)]:
+            assert strength < urgent_threshold, \
+                f"score={score}: strength={strength} should be < {urgent_threshold} (PostOnly)"
 
-        # score 9만 시장가 트리거
-        strength_9 = min(0.95, urgent_threshold + 0.01)
-        assert strength_9 > urgent_threshold, f"score=9: {strength_9} should be > {urgent_threshold}"
+        strength_9 = urgent_threshold + 0.01  # 0.91
+        assert strength_9 > urgent_threshold, \
+            f"score=9: {strength_9} should be > {urgent_threshold} (Market)"
 
     def test_strength_capped_at_095(self):
         """strength가 0.95를 초과하지 않음."""

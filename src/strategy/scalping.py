@@ -57,6 +57,17 @@ log = get_logger(__name__)
 _MAX_POSITIVE_SCORE = 9   # htf_ema(2) + htf_vwap(1) + ltf_ema(2) + zone(1) + rsi(1) + vol(1) + candle(1)
 _MAX_PENALTY_SCORE = -2   # adverse_funding(-1) + wide_spread(-1)
 
+# 레버리지 티어 경계 정렬 강도 매핑 (engine.py 티어 기준)
+# engine.py 티어: <0.65→2-3×, ≥0.65→4-5×, ≥0.75→8-10×, ≥0.80→15-18×, ≥0.85→20×
+# score 9만 SIGNAL_URGENT_THRESHOLD(0.90) 초과 → 시장가(Taker) 트리거
+_SCORE_STRENGTH_MAP: dict[int, float] = {
+    5: 0.60,   # < 0.65 → default tier (2-3×)
+    6: 0.69,   # ≥ 0.65 → 4-5× tier
+    7: 0.77,   # ≥ 0.75 → 8-10× tier
+    8: 0.83,   # ≥ 0.80 → 15-18× tier
+    # 9 → urgent_threshold + 0.01 = 0.91 → ≥0.85(20×) + Market 트리거
+}
+
 
 @dataclass
 class ScalpSignalDetail:
@@ -241,20 +252,18 @@ class ScalpingStrategy:
             )
             return self._neutral(), ltf_atr
 
-        # ── 신호 강도 매핑 ────────────────────────────────────────────────────
-        # score 5→0.60, 6→0.67, 7→0.74, 8→0.81, 9→0.88(base)
-        # 최대 점수(9)만 SIGNAL_URGENT_THRESHOLD 이상 → 시장가 주문 트리거
-        # 나머지(5-8)는 base_strength 그대로 → PostOnly 선호 (수수료 절감)
-        base_strength = 0.60 + (score - min_score) * 0.07
-
+        # ── 신호 강도 매핑 (엔진 티어 경계 정렬) ─────────────────────────────
+        # _SCORE_STRENGTH_MAP: 각 score가 별도 레버리지 티어에 속하도록 명시적 매핑
+        # score 5→0.60(2-3×), 6→0.69(4-5×), 7→0.77(8-10×), 8→0.83(15-18×)
+        # score 9→0.91: ≥0.85(20×) + SIGNAL_URGENT_THRESHOLD 초과 → 시장가 트리거
         urgent_threshold = self._s.SIGNAL_URGENT_THRESHOLD  # 0.90
 
         if score >= _MAX_POSITIVE_SCORE:
             # 최고 점수(9)만 시장가 트리거 → 즉시 체결 보장
             strength = urgent_threshold + 0.01  # 0.91
         else:
-            # score 5-8: 연속 강도(0.60~0.81) → PostOnly (수수료 절감)
-            strength = base_strength
+            # score 5-8: 티어 경계 정렬 강도 → PostOnly (수수료 절감)
+            strength = _SCORE_STRENGTH_MAP.get(score, 0.60)
 
         strength = min(0.95, strength)
 
