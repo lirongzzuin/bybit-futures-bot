@@ -289,51 +289,49 @@ class TestScalpingStrategyScoring:
         computed = min(0.95, 0.60 + (5 - min_score) * 0.07)
         assert abs(computed - expected) < 1e-9
 
-    def test_score_7_gives_strength_091(self):
-        """score=7 (urgent) 시 strength=0.91 → 시장가 주문 트리거."""
-        # urgent_score=7, urgent_threshold=0.90
-        # base=0.74, max(0.91, 0.74) = 0.91
-        urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD  # 0.90
-        urgent_score = self.settings.SCALP_PURE_ENTRY_URGENT_SCORE  # 7
+    def test_score_7_gives_strength_074(self):
+        """score=7 (non-urgent) 시 strength=0.74 → PostOnly 선호."""
+        # 연속 강도: base=0.60+(7-5)*0.07=0.74, 최고점수(9)만 시장가 트리거
         min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
         base = 0.60 + (7 - min_score) * 0.07  # 0.74
-        # score >= urgent_score → strength = max(threshold+0.01, base) capped at 0.95
-        expected = min(0.95, max(urgent_threshold + 0.01, base))
-        assert abs(expected - 0.91) < 1e-6
+        expected = min(0.95, base)
+        assert abs(expected - 0.74) < 1e-6
+
+    def test_score_8_gives_strength_081(self):
+        """score=8 (non-urgent) 시 strength=0.81 → PostOnly 선호."""
+        # 연속 강도: base=0.60+(8-5)*0.07=0.81
+        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
+        base = 0.60 + (8 - min_score) * 0.07  # 0.81
+        expected = min(0.95, base)
+        assert abs(expected - 0.81) < 1e-6
 
     def test_score_9_gives_strength_091(self):
-        """score=9 (urgent) 시 strength=0.91 → 시장가 주문 트리거."""
-        # base=0.88, max(0.91, 0.88) = 0.91
+        """score=9 (최고점수) 시 strength=0.91 → 시장가 주문 트리거."""
+        # 최고 점수만 시장가 트리거: urgent_threshold+0.01 = 0.91
         urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD
-        min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
-        base = 0.60 + (9 - min_score) * 0.07  # 0.88
-        expected = min(0.95, max(urgent_threshold + 0.01, base))
+        expected = min(0.95, urgent_threshold + 0.01)
         assert abs(expected - 0.91) < 1e-6
 
     def test_score_6_gives_strength_067(self):
         """score=6 (non-urgent) 시 strength=0.67 → PostOnly 선호."""
-        # min(0.89, 0.67) = 0.67
-        urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD
         min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE
         base = 0.60 + (6 - min_score) * 0.07  # 0.67
-        expected = min(0.95, min(urgent_threshold - 0.01, base))
+        expected = min(0.95, base)
         assert abs(expected - 0.67) < 1e-6
 
     def test_urgent_score_threshold_boundary(self):
-        """urgent_score(7) 미만은 SIGNAL_URGENT_THRESHOLD 미만, 이상은 초과."""
+        """score 5-8은 SIGNAL_URGENT_THRESHOLD 미만, score 9만 초과."""
         urgent_threshold = self.settings.SIGNAL_URGENT_THRESHOLD  # 0.90
-        urgent_score = self.settings.SCALP_PURE_ENTRY_URGENT_SCORE  # 7
         min_score = self.settings.SCALP_PURE_ENTRY_MIN_SCORE  # 5
 
-        for score in [5, 6]:
+        for score in [5, 6, 7, 8]:
             base = 0.60 + (score - min_score) * 0.07
-            strength = min(0.95, min(urgent_threshold - 0.01, base))
+            strength = min(0.95, base)
             assert strength < urgent_threshold, f"score={score}: {strength} should be < {urgent_threshold}"
 
-        for score in [7, 8, 9]:
-            base = 0.60 + (score - min_score) * 0.07
-            strength = min(0.95, max(urgent_threshold + 0.01, base))
-            assert strength > urgent_threshold, f"score={score}: {strength} should be > {urgent_threshold}"
+        # score 9만 시장가 트리거
+        strength_9 = min(0.95, urgent_threshold + 0.01)
+        assert strength_9 > urgent_threshold, f"score=9: {strength_9} should be > {urgent_threshold}"
 
     def test_strength_capped_at_095(self):
         """strength가 0.95를 초과하지 않음."""

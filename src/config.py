@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     SCALP_PURE_VOLUME_MULT: float = 1.2       # 볼륨 확인: 평균 대비 1.2배 이상
     SCALP_PURE_EMA_ZONE_ATR: float = 1.0      # EMA 존 범위: EMA20 ± 1.0×ATR
     SCALP_PURE_ENTRY_MIN_SCORE: int = 5       # 진입 최소 점수 (9점 만점)
-    SCALP_PURE_ENTRY_URGENT_SCORE: int = 7    # 긴급 진입 점수 → 시장가 선호
+    SCALP_PURE_ENTRY_URGENT_SCORE: int = 9    # 긴급 진입 점수 → 시장가 선호 (최고 점수만)
     # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
     SCALP_PURE_STOP_ATR: float = 1.0          # SL: 1.0× ATR (타이트 — 빠른 손절)
     SCALP_PURE_TP1_ATR: float = 1.5           # TP1: 1.5× ATR (R:R 1.5:1)

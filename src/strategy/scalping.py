@@ -242,27 +242,19 @@ class ScalpingStrategy:
             return self._neutral(), ltf_atr
 
         # ── 신호 강도 매핑 ────────────────────────────────────────────────────
-        # 기본: score 5→0.60, 6→0.67, 7→0.74, 8→0.81, 9→0.88
-        # 긴급(score≥7): max(0.91, base) → 시장가 주문 트리거
-        # 일반(score<7): min(0.89, base) → PostOnly 선호 (수수료 절감)
+        # score 5→0.60, 6→0.67, 7→0.74, 8→0.81, 9→0.88(base)
+        # 최대 점수(9)만 SIGNAL_URGENT_THRESHOLD 이상 → 시장가 주문 트리거
+        # 나머지(5-8)는 base_strength 그대로 → PostOnly 선호 (수수료 절감)
         base_strength = 0.60 + (score - min_score) * 0.07
 
-        # ── 긴급 신호: URGENT_SCORE 이상이면 시장가 주문 트리거 ─────────────
-        # score >= URGENT_SCORE(7): 신호 강도를 SIGNAL_URGENT_THRESHOLD 이상으로 설정
-        #   → order_manager가 PostOnly 대신 시장가(Taker) 주문 선택
-        #   → 즉시 체결 보장 (높은 확신도 신호에 한해 슬리피지 감수)
-        # score < URGENT_SCORE: 항상 PostOnly 지정가(Maker, 0.020%) 선호
-        #   → 수수료 최소화 (스프레드 0.3% 초과 시에만 시장가 폴백)
-        urgent_score = self._s.SCALP_PURE_ENTRY_URGENT_SCORE
         urgent_threshold = self._s.SIGNAL_URGENT_THRESHOLD  # 0.90
 
-        if score >= urgent_score:
-            # 긴급: SIGNAL_URGENT_THRESHOLD 바로 위 → 시장가 주문 트리거
-            # 단, base_strength가 이미 threshold 이상이면 base_strength 유지
-            strength = max(urgent_threshold + 0.01, base_strength)
+        if score >= _MAX_POSITIVE_SCORE:
+            # 최고 점수(9)만 시장가 트리거 → 즉시 체결 보장
+            strength = urgent_threshold + 0.01  # 0.91
         else:
-            # 일반: threshold 미만 유지 → PostOnly 선호 (수수료 절감)
-            strength = min(urgent_threshold - 0.01, base_strength)
+            # score 5-8: 연속 강도(0.60~0.81) → PostOnly (수수료 절감)
+            strength = base_strength
 
         strength = min(0.95, strength)
 
