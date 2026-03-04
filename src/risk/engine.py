@@ -96,6 +96,14 @@ class RiskEngine:
             tp2_atr_mult = self._s.TREND_TP2_ATR
             partial_exit_pct = self._s.TREND_PARTIAL_EXIT_PCT
             mode_max_bars = self._s.TREND_MAX_BARS
+        elif resolved_mode == "PURE_SCALP":
+            # 순수 스캘핑 전략: 3분봉 기반, 타이트한 파라미터
+            # SCALP 대비: stop 1.0× (vs 1.2×), TP1 1.5× (vs 2.5×), TP2 3.0× (vs 5.5×)
+            stop_atr_mult = self._s.SCALP_PURE_STOP_ATR
+            tp1_atr_mult = self._s.SCALP_PURE_TP1_ATR
+            tp2_atr_mult = self._s.SCALP_PURE_TP2_ATR
+            partial_exit_pct = self._s.SCALP_PURE_PARTIAL_EXIT_PCT
+            mode_max_bars = self._s.SCALP_PURE_MAX_BARS
         else:
             stop_atr_mult = self._s.SCALP_STOP_ATR
             tp1_atr_mult = self._s.SCALP_TP1_ATR
@@ -196,7 +204,6 @@ class RiskEngine:
         raw_leverage = base_leverage * vol_mod * liq_mod * fund_mod * sig_mod * health_mod
 
         # Hard caps
-        # Bear/Sideways 모드: BTC+ETH 고배율 스캘핑 허용 (최대 50×)
         risk_engine_cap = self._s.BEAR_MAX_LEVERAGE_CAP if bear_mode else self._s.MAX_LEVERAGE_CAP
         exchange_cap = min(symbol_max_leverage, 100)
 
@@ -277,7 +284,7 @@ class RiskEngine:
             )
 
         # ── Step 7b: 수수료 손익분기점 체크 ──────────────────────────────────
-        # TP1 도달 시 예상 수익이 수수료(진입 + 청산)의 2배 이상이어야 진입.
+        # TP1 도달 시 예상 수익이 수수료(진입 + 청산) × safety_multiplier 이상이어야 진입.
         #
         # 진입 주문 유형별 수수료 적용 (order_manager.py 선택 로직과 동일):
         #   - 스프레드 > SPREAD_TAKER_THRESHOLD  또는
@@ -295,17 +302,24 @@ class RiskEngine:
             entry_fee_rate + self._s.BACKTEST_FEE_MAKER + self._s.BACKTEST_SLIPPAGE_PCT * 2
         )
         tp1_move_pct = (atr * tp1_atr_mult) / entry_price
-        fee_safety_multiplier = 2.0  # TP1 수익이 수수료의 최소 2배 (강화)
-        # 예시 (ATR=0.107%, 일반 PostOnly 진입):
-        #   round_trip = 0.020% + 0.020% + 0.040% = 0.080%  → min_tp1 = 0.160%
-        # 예시 (ATR=0.107%, 시장가 진입 — 스프레드 넓거나 긴급):
-        #   round_trip = 0.055% + 0.020% + 0.040% = 0.115%  → min_tp1 = 0.230%
+
+        # ── 모드별 수수료 안전 배수 ──────────────────────────────────────────
+        # PURE_SCALP (3분봉): TP1=1.5×ATR — 타이트, 배수 낮춰야 과도한 필터 방지
+        #   PostOnly: 0.080%×1.5 = 0.120% → ATR >= 0.08% 필요
+        #   Market:   0.115%×1.5 = 0.173% → ATR >= 0.115% 필요
+        # SCALP/TREND_RIDE (15분봉): TP1=2.5-4.0×ATR — 여유 있음, 2.0× 유지
+        #   PostOnly: 0.080%×2.0 = 0.160% → ATR >= 0.064% 필요
+        if resolved_mode == "PURE_SCALP":
+            fee_safety_multiplier = 1.5   # 3분봉 스캘핑: 1.5× (여전히 수수료의 1.5배 확보)
+        else:
+            fee_safety_multiplier = 2.0   # 15분봉 스윙/SCALP: 2.0× (보수적)
+
         if tp1_move_pct < round_trip_fee_pct * fee_safety_multiplier:
             entry_type = "Taker(시장가)" if entry_is_market else "Maker(PostOnly)"
             return self._no_trade(
                 f"TP1 예상수익 {tp1_move_pct:.4%} < 수수료×{fee_safety_multiplier:.1f} "
                 f"{round_trip_fee_pct * fee_safety_multiplier:.4%} "
-                f"[진입={entry_type}] — 수수료 손익분기 미달"
+                f"[진입={entry_type}, 모드={resolved_mode}] — 수수료 손익분기 미달"
             )
 
         # ── Step 8: Liquidation distance check ────────────────────────────────
@@ -319,14 +333,11 @@ class RiskEngine:
             liq_price = entry_price * (1.0 + 1.0 / final_leverage - maintenance_margin_rate)
             liq_distance = liq_price - entry_price
 
-        # 고배율(≥25×): 1.5× 버퍼 허용 (타이트 스탑 + 넓은 TP R:R 설계)
-        # 저배율(<25×): 3× 버퍼 유지 (안전 우선)
-        liq_buffer_mult = 1.5 if final_leverage >= 25 else 3.0
-        min_liq_buffer = stop_distance * liq_buffer_mult
+        min_liq_buffer = stop_distance * 3.0
         if liq_distance < min_liq_buffer:
             return self._no_trade(
                 f"Liquidation too close: liq_dist={liq_distance:.4f} "
-                f"< {liq_buffer_mult}×stop={min_liq_buffer:.4f} (lev={final_leverage}× liq={liq_price:.4f})"
+                f"< 3×stop={min_liq_buffer:.4f} (lev={final_leverage}× liq={liq_price:.4f})"
             )
 
         log.debug(

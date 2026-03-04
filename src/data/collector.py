@@ -120,6 +120,103 @@ class DataCollector:
 
         return snap
 
+    def collect_for_scalp(self, symbol: str, limit: int = 500) -> MarketSnapshot:
+        """
+        순수 스캘핑 전략용 데이터 수집.
+
+        STRATEGY_MODE="scalp" 일 때 호출:
+          - snap.ohlcv      = LTF (3m) 봉 — ScalpingStrategy 진입 신호용
+          - snap.trend_ohlcv = HTF (15m) 봉 — 추세 바이어스 필터용
+
+        일반 collect()와 동일한 MarketSnapshot 반환,
+        단 타임프레임이 설정의 SCALP_PURE_LTF_TIMEFRAME / SCALP_PURE_HTF_TIMEFRAME 사용.
+        """
+        snap = MarketSnapshot(symbol=symbol)
+
+        # LTF OHLCV (3m 기본)
+        try:
+            ltf_interval = _INTERVAL_MAP.get(self._settings.SCALP_PURE_LTF_TIMEFRAME, "3")
+            raw = self._client.get_kline(symbol, interval=ltf_interval, limit=limit)
+            if raw:
+                df = pd.DataFrame(
+                    raw,
+                    columns=["ts", "open", "high", "low", "close", "volume", "turnover"],
+                )
+                df = df.astype({
+                    "ts": "int64", "open": "float64", "high": "float64",
+                    "low": "float64", "close": "float64", "volume": "float64",
+                    "turnover": "float64",
+                })
+                df["datetime"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                df.sort_values("ts", inplace=True)
+                df.reset_index(drop=True, inplace=True)
+                snap.ohlcv = df
+        except Exception as e:
+            log.error("Scalp LTF OHLCV fetch failed for %s: %s", symbol, e)
+            return snap
+
+        # HTF OHLCV (15m 기본) — 추세 바이어스
+        try:
+            htf_interval = _INTERVAL_MAP.get(self._settings.SCALP_PURE_HTF_TIMEFRAME, "15")
+            raw_htf = self._client.get_kline(symbol, interval=htf_interval, limit=300)
+            if raw_htf:
+                df_htf = pd.DataFrame(
+                    raw_htf,
+                    columns=["ts", "open", "high", "low", "close", "volume", "turnover"],
+                )
+                df_htf = df_htf.astype({
+                    "ts": "int64", "open": "float64", "high": "float64",
+                    "low": "float64", "close": "float64", "volume": "float64",
+                    "turnover": "float64",
+                })
+                df_htf["datetime"] = pd.to_datetime(df_htf["ts"], unit="ms", utc=True)
+                df_htf.sort_values("ts", inplace=True)
+                df_htf.reset_index(drop=True, inplace=True)
+                snap.trend_ohlcv = df_htf
+        except Exception as e:
+            log.warning("Scalp HTF OHLCV fetch failed for %s: %s", symbol, e)
+
+        # 오더북
+        try:
+            snap.orderbook = self._fetch_orderbook(symbol)
+        except Exception as e:
+            log.warning("Orderbook fetch failed for %s: %s", symbol, e)
+
+        # 펀딩 비율
+        try:
+            funding = self._client.get_funding_rate_history(symbol, limit=5)
+            if funding:
+                snap.funding_rate = float(funding[0].get("fundingRate", 0))
+                snap.next_funding_ts = int(funding[0].get("fundingRateTimestamp", 0))
+        except Exception as e:
+            log.warning("Funding fetch failed for %s: %s", symbol, e)
+
+        # OI (LTF 타임프레임 기준)
+        try:
+            oi_records = self._client.get_open_interest(
+                symbol,
+                interval_time=_oi_interval(self._settings.SCALP_PURE_LTF_TIMEFRAME),
+                limit=5,
+            )
+            if len(oi_records) >= 2:
+                snap.open_interest = float(oi_records[0].get("openInterest", 0))
+                snap.oi_prev = float(oi_records[1].get("openInterest", 0))
+                if snap.oi_prev > 0:
+                    snap.oi_change_pct = (snap.open_interest - snap.oi_prev) / snap.oi_prev
+        except Exception as e:
+            log.warning("OI fetch failed for %s: %s", symbol, e)
+
+        if not snap.ohlcv.empty:
+            snap.last_price = float(snap.ohlcv["close"].iloc[-1])
+
+        # VWAP (LTF 데이터 기준)
+        if not snap.ohlcv.empty:
+            snap.vwap = self._compute_vwap(snap.ohlcv, self._settings.VWAP_SESSION_BARS)
+            if snap.vwap > 0 and snap.last_price > 0:
+                snap.vwap_distance_pct = (snap.last_price - snap.vwap) / snap.vwap
+
+        return snap
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _fetch_ohlcv(self, symbol: str, limit: int) -> pd.DataFrame:

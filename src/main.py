@@ -43,6 +43,7 @@ from src.strategy.indicators import volatility_percentile
 from src.strategy.macro_regime import MacroRegimeDetector, MacroRegime
 from src.strategy.regime import RegimeDetector, Regime
 from src.strategy.scalp import TradeModeDetector
+from src.strategy.scalping import ScalpingStrategy
 from src.strategy.signals import SignalGenerator
 
 log = get_logger(__name__)
@@ -65,6 +66,7 @@ class TradingBot:
         self._sig_gen = SignalGenerator(settings)
         self._combiner = SignalCombiner(settings)
         self._mode_detector = TradeModeDetector(settings)
+        self._scalp_strategy = ScalpingStrategy(settings)
         self._risk_engine = RiskEngine(settings)
         self._guards = RiskGuards(settings)
         self._state_machine = StateMachine(settings)
@@ -176,33 +178,21 @@ class TradingBot:
         weekly_pnl: float,
         peak_equity: float,
     ) -> None:
-        # Collect market data
-        snap = self._collector.collect(symbol, limit=250)
-        if snap.ohlcv.empty or len(snap.ohlcv) < 100:
-            log.warning("Insufficient data for %s (%d bars)", symbol, len(snap.ohlcv))
+        # ── 전략별 데이터 수집 및 신호 생성 ──────────────────────────────────
+        if settings.STRATEGY_MODE == "scalp":
+            result = self._collect_and_signal_scalp(symbol)
+        else:
+            result = self._collect_and_signal_swing(symbol)
+
+        if result is None:
+            return
+
+        snap, combined, atr_val, regime_r, trade_mode_str = result
+        if snap.ohlcv.empty:
             return
 
         df = snap.ohlcv
         current_price = snap.last_price
-
-        # ── Run strategy ──────────────────────────────────────────────────────
-        # Use trend TF bars for regime detection if available
-        regime_df = snap.trend_ohlcv if (
-            snap.trend_ohlcv is not None and len(snap.trend_ohlcv) >= 60
-        ) else df
-        regime_r = self._regime.detect(regime_df, oi_change_pct=snap.oi_change_pct)
-        ict_r = self._ict.analyze(df)
-        sig_bundle = self._sig_gen.generate(
-            df, ict_r,
-            funding_rate=snap.funding_rate,
-            oi_change_pct=snap.oi_change_pct,
-            spread_pct=snap.orderbook.spread_pct,
-            vwap=snap.vwap,
-            vwap_distance_pct=snap.vwap_distance_pct,
-            orderbook_imbalance=snap.orderbook.imbalance,
-            htf_df=snap.trend_ohlcv,  # 4H 데이터 → HTF 추세 필터 활성화
-        )
-        combined = self._combiner.combine(sig_bundle, regime_r)
 
         # Vol percentile for guards
         close = df["close"]
@@ -225,8 +215,7 @@ class TradingBot:
             self._emergency_close_all(symbols=[symbol])
             return
 
-        # ── Daily loss Slack 알림 (하루 한 번, guard reason에 포함된 경우)
-        # guards.py는 이제 ALLOW를 반환하지만 reason에 "Daily loss"를 포함
+        # ── Daily loss Slack 알림 (하루 한 번)
         if guard.reason and "Daily loss" in guard.reason:
             today_kst = datetime.now(tz=_KST).date().isoformat()
             if self._daily_loss_alert_sent_date != today_kst:
@@ -242,9 +231,10 @@ class TradingBot:
         pos = self._state_machine.get_position(symbol)
 
         if not pos.is_flat:
-            # Calculate bars in trade
-            bars_in_trade = int((time.time() - pos.entry_ts) /
-                                (int(settings.SIGNAL_TIMEFRAME) * 60))
+            # 보유 봉 수 계산 (전략별 타임프레임 기준)
+            bar_minutes = int(settings.SCALP_PURE_LTF_TIMEFRAME) if settings.STRATEGY_MODE == "scalp" \
+                else int(settings.SIGNAL_TIMEFRAME)
+            bars_in_trade = int((time.time() - pos.entry_ts) / (bar_minutes * 60))
 
             # Detect regime flip (adversely against position)
             regime_flip = (
@@ -255,7 +245,7 @@ class TradingBot:
             exit_check = self._state_machine.check_exit(
                 symbol=symbol,
                 current_price=current_price,
-                current_atr=sig_bundle.atr_val,
+                current_atr=atr_val,
                 signal_direction=combined.direction,
                 regime_flip=regime_flip,
                 bars_in_trade=bars_in_trade,
@@ -271,11 +261,9 @@ class TradingBot:
             return  # one action per symbol per cycle
 
         # ── Entry logic ───────────────────────────────────────────────────────
-        # PAUSE: 극단적 스프레드(>1%) 시에만 진입 중지 (daily/weekly 손실은 허용)
-        # REDUCE: 높은 변동성 시 레버리지 축소 (진입 자체는 허용)
         if guard.action == GuardAction.PAUSE:
             log.debug("Guard PAUSE: %s — 신규 진입 건너뜀", guard.reason)
-            return  # 극단적 스프레드 시에만 진입 중지
+            return
 
         if combined.direction == 0:
             return
@@ -291,24 +279,13 @@ class TradingBot:
         # Get consecutive losses for risk dampening
         consec = self._db.get_consecutive_losses(symbol)
 
-        # Detect trade mode (SCALP vs TREND_RIDE)
-        mode_result = self._mode_detector.detect(
-            regime=regime_r,
-            ict_result=ict_r,
-            bundle=sig_bundle,
-            funding_rate=snap.funding_rate,
-            spread_pct=snap.orderbook.spread_pct,
-            direction=combined.direction,
-        )
-
         # Calculate risk parameters
-        # Bear/Sideways 모드: BTC+ETH 고배율 레버리지 허용
         is_bear_mode = (self._macro_mode == "BEAR_SIDEWAYS")
         risk_params = self._risk_engine.calculate(
             equity=equity,
             entry_price=current_price,
             side="Buy" if combined.direction == 1 else "Sell",
-            atr=sig_bundle.atr_val,
+            atr=atr_val,
             signal_strength=combined.strength,
             spread_pct=snap.orderbook.spread_pct,
             funding_rate=snap.funding_rate,
@@ -318,7 +295,7 @@ class TradingBot:
             symbol_max_leverage=sym_info.get("max_leverage", 100),
             symbol_info=sym_info,
             current_positions=self._state_machine.open_count(),
-            trade_mode=mode_result.mode.value,
+            trade_mode=trade_mode_str,
             bear_mode=is_bear_mode,
         )
 
@@ -327,15 +304,104 @@ class TradingBot:
             return
 
         log.info(
-            "Signal %s %s strength=%.2f regime=%s",
+            "Signal %s %s strength=%.2f regime=%s strategy=%s",
             symbol,
             "Buy" if combined.direction == 1 else "Sell",
             combined.strength,
             regime_r.regime.value,
+            settings.STRATEGY_MODE,
         )
 
         # Execute entry
         self._execute_entry(symbol, combined.direction, risk_params, snap, sym_info, combined.strength)
+
+    # ── Strategy Signal Methods ────────────────────────────────────────────────
+
+    def _collect_and_signal_swing(self, symbol: str):
+        """
+        스윙/추세추종 전략: 15분봉 데이터 수집 + 복합 신호 생성.
+        Returns (snap, combined, atr_val, regime_r, trade_mode_str) or None
+        """
+        snap = self._collector.collect(symbol, limit=250)
+        if snap.ohlcv.empty or len(snap.ohlcv) < 100:
+            log.warning("Insufficient data for %s (%d bars)", symbol, len(snap.ohlcv))
+            return None
+
+        df = snap.ohlcv
+
+        # Regime detection
+        regime_df = snap.trend_ohlcv if (
+            snap.trend_ohlcv is not None and len(snap.trend_ohlcv) >= 60
+        ) else df
+        regime_r = self._regime.detect(regime_df, oi_change_pct=snap.oi_change_pct)
+
+        # ICT + signal generation
+        ict_r = self._ict.analyze(df)
+        sig_bundle = self._sig_gen.generate(
+            df, ict_r,
+            funding_rate=snap.funding_rate,
+            oi_change_pct=snap.oi_change_pct,
+            spread_pct=snap.orderbook.spread_pct,
+            vwap=snap.vwap,
+            vwap_distance_pct=snap.vwap_distance_pct,
+            orderbook_imbalance=snap.orderbook.imbalance,
+            htf_df=snap.trend_ohlcv,
+        )
+        combined = self._combiner.combine(sig_bundle, regime_r)
+
+        # Trade mode (SCALP or TREND_RIDE) detection
+        mode_result = self._mode_detector.detect(
+            regime=regime_r,
+            ict_result=ict_r,
+            bundle=sig_bundle,
+            funding_rate=snap.funding_rate,
+            spread_pct=snap.orderbook.spread_pct,
+            direction=combined.direction,
+        )
+        trade_mode_str = mode_result.mode.value
+
+        return snap, combined, sig_bundle.atr_val, regime_r, trade_mode_str
+
+    def _collect_and_signal_scalp(self, symbol: str):
+        """
+        순수 스캘핑 전략: 3분봉(LTF) + 15분봉(HTF) 데이터 수집 + 스캘핑 신호 생성.
+        Returns (snap, combined, atr_val, regime_r, trade_mode_str) or None
+        """
+        from src.strategy.regime import RegimeResult
+
+        snap = self._collector.collect_for_scalp(symbol, limit=500)
+        if snap.ohlcv.empty or len(snap.ohlcv) < 50:
+            log.warning("Scalp: Insufficient LTF data for %s (%d bars)", symbol, len(snap.ohlcv))
+            return None
+
+        # 스캘핑 신호 생성
+        combined, atr_val = self._scalp_strategy.generate(
+            ltf_df=snap.ohlcv,
+            htf_df=snap.trend_ohlcv,
+            vwap_val=snap.vwap,
+            funding_rate=snap.funding_rate,
+            spread_pct=snap.orderbook.spread_pct,
+            oi_change_pct=snap.oi_change_pct,
+        )
+
+        # 스캘핑 모드에서 RegimeResult 합성 (check_exit의 regime_flip에 사용)
+        regime_r = RegimeResult(
+            regime=combined.regime,
+            confidence=combined.strength,
+            adx_val=0.0,
+            plus_di=0.0,
+            minus_di=0.0,
+            ema_aligned_up=(combined.direction == 1),
+            ema_aligned_down=(combined.direction == -1),
+            vol_percentile=0.5,
+            volume_ratio=1.0,
+            trend_score=combined.long_score - combined.short_score,
+        )
+
+        # 스캘핑 전략은 항상 PURE_SCALP 모드 사용 (타이트한 ATR 파라미터)
+        trade_mode_str = "PURE_SCALP"
+
+        return snap, combined, atr_val, regime_r, trade_mode_str
 
     # ── Order Execution ───────────────────────────────────────────────────────
 
@@ -794,8 +860,15 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-    # Bot cycle: every 5 minutes
-    cycle_interval = int(settings.SIGNAL_TIMEFRAME) if int(settings.SIGNAL_TIMEFRAME) <= 60 else 5
+    # Bot cycle: 스캘핑 모드는 LTF 타임프레임, 스윙 모드는 SIGNAL_TIMEFRAME 기준
+    if settings.STRATEGY_MODE == "scalp":
+        cycle_interval = int(settings.SCALP_PURE_LTF_TIMEFRAME)  # 3분 기본
+    else:
+        cycle_interval = int(settings.SIGNAL_TIMEFRAME) if int(settings.SIGNAL_TIMEFRAME) <= 60 else 5
+    log.info(
+        "Scheduler cycle: %d min (strategy=%s)",
+        cycle_interval, settings.STRATEGY_MODE,
+    )
     scheduler.add_job(
         bot.run_cycle,
         "interval",

@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # ── Trading Mode ──────────────────────────────────────────
     TRADING_MODE: Literal["dry-run", "paper", "live"] = "dry-run"
 
+    # ── Strategy Selection ────────────────────────────────────
+    # "swing": 현재 15분봉 기반 스윙/추세추종 전략 (기본값)
+    # "scalp": 3분봉 기반 EMA Ribbon+VWAP+RSI 순수 스캘핑 전략
+    STRATEGY_MODE: Literal["swing", "scalp"] = "swing"
+
     # ── Bybit API ─────────────────────────────────────────────
     BYBIT_API_KEY: str = ""
     BYBIT_API_SECRET: str = ""
@@ -54,6 +59,32 @@ class Settings(BaseSettings):
     TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
     TREND_PARTIAL_EXIT_PCT: float = 0.45       # close 45% at TP1, keep 55% for full run
     TREND_RIDE_SCORE_THRESHOLD: int = 1        # allow trend ride more often
+
+    # ── Pure Scalping Strategy Parameters (STRATEGY_MODE="scalp") ──────────
+    # LTF (진입 신호용) / HTF (추세 바이어스용) 타임프레임
+    SCALP_PURE_LTF_TIMEFRAME: str = "3"       # 3분봉 — 스캘핑 진입 신호
+    SCALP_PURE_HTF_TIMEFRAME: str = "15"      # 15분봉 — HTF 추세 바이어스 필터
+    # EMA 파라미터 (LTF에서 사용)
+    SCALP_PURE_EMA_FAST: int = 9
+    SCALP_PURE_EMA_MID: int = 21
+    SCALP_PURE_EMA_SLOW: int = 50
+    # RSI 진입 구간
+    SCALP_PURE_RSI_PERIOD: int = 14
+    SCALP_PURE_RSI_LONG_MIN: float = 40.0     # 롱: RSI 40 이상 (모멘텀 형성)
+    SCALP_PURE_RSI_LONG_MAX: float = 65.0     # 롱: RSI 65 이하 (과매수 회피)
+    SCALP_PURE_RSI_SHORT_MIN: float = 35.0    # 숏: RSI 35 이상
+    SCALP_PURE_RSI_SHORT_MAX: float = 60.0    # 숏: RSI 60 이하 (과매도 회피)
+    # 진입 조건
+    SCALP_PURE_VOLUME_MULT: float = 1.2       # 볼륨 확인: 평균 대비 1.2배 이상
+    SCALP_PURE_EMA_ZONE_ATR: float = 1.0      # EMA 존 범위: EMA20 ± 1.0×ATR
+    SCALP_PURE_ENTRY_MIN_SCORE: int = 5       # 진입 최소 점수 (9점 만점)
+    SCALP_PURE_ENTRY_URGENT_SCORE: int = 7    # 긴급 진입 점수 → 시장가 선호
+    # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
+    SCALP_PURE_STOP_ATR: float = 1.0          # SL: 1.0× ATR (타이트 — 빠른 손절)
+    SCALP_PURE_TP1_ATR: float = 1.5           # TP1: 1.5× ATR (R:R 1.5:1)
+    SCALP_PURE_TP2_ATR: float = 3.0           # TP2: 3.0× ATR (R:R 3:1, 트레일링)
+    SCALP_PURE_MAX_BARS: int = 20             # 최대 보유: 3분봉×20 = 60분
+    SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.50 # TP1에서 50% 청산, 50% 유지
 
     # ── Signal Quality Filters (15분봉 기준 최적화) ─────────────────
     SIGNAL_FILTER_ER_THRESHOLD: float = 0.06   # 추세성 확인 (완화로 기회 확대)
