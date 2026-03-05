@@ -265,6 +265,18 @@ class TradingBot:
             log.debug("Guard PAUSE: %s — 신규 진입 건너뜀", guard.reason)
             return
 
+        # ── Recovery mode: REDUCE 구간에서 저품질 신호 거부 ─────────────────
+        # heavy reduce (>60%): score 7+ (strength ≥ 0.77) 신호만 허용
+        # 드로우다운 회복 중에는 최고품질 신호에만 소규모 진입
+        if guard.action == GuardAction.REDUCE and guard.reduce_pct > 0.60:
+            if combined.strength < 0.77:
+                log.debug(
+                    "Recovery REDUCE mode: skipping weak signal "
+                    "(strength=%.2f reduce_pct=%.2f)",
+                    combined.strength, guard.reduce_pct,
+                )
+                return
+
         if combined.direction == 0:
             return
 
@@ -302,6 +314,21 @@ class TradingBot:
         if not risk_params.risk_ok:
             log.debug("Risk check failed for %s: %s", symbol, risk_params.reason)
             return
+
+        # ── Recovery mode: 포지션 비중 축소 적용 ────────────────────────────
+        # REDUCE 가드 발동 시 계산된 포지션 사이즈를 비례 축소
+        # risk_engine은 정상 사이즈로 계산 → 여기서 실제 비중 조정
+        if guard.action == GuardAction.REDUCE and guard.reduce_pct > 0:
+            scale = max(0.10, 1.0 - guard.reduce_pct)  # 최소 10% 유지
+            risk_params.qty_base *= scale
+            risk_params.position_size_usdt *= scale
+            risk_params.margin_usdt *= scale
+            risk_params.max_loss_usdt *= scale
+            log.info(
+                "Recovery REDUCE mode: %s position scaled to %.0f%% "
+                "(dd_reduce_pct=%.2f)",
+                symbol, scale * 100, guard.reduce_pct,
+            )
 
         log.info(
             "Signal %s %s strength=%.2f regime=%s strategy=%s",

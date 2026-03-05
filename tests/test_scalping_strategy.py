@@ -557,7 +557,8 @@ class TestScalpingStrategyScoreDetails:
         assert d["rsi_in_zone"] == 0
 
     def test_bull_candle_condition(self):
-        """양봉 (close > open) 시 bull_candle=1."""
+        """양봉 + 바디 > 0.15×ATR 시 bull_candle=1 (도지 제외)."""
+        # ltf_atr=500, min_body=500*0.15=75
         base_kwargs = dict(
             current_vol=100.0, avg_vol=200.0,
             ltf_ema9=50000.0, ltf_ema21=50000.0, ltf_atr=500.0, ltf_rsi=52.0,
@@ -565,16 +566,21 @@ class TestScalpingStrategyScoreDetails:
             htf_vwap=0.0, htf_price=0.0, has_htf=False,
             funding_rate=0.0, spread_pct=0.001,
         )
-        # 양봉
+        # 양봉 + body=200 > min_body=75 → +1
         _, d = self.strategy._score_long(current_price=50100.0, current_open=49900.0, **base_kwargs)
         assert d["bull_candle"] == 1
 
-        # 음봉
+        # 음봉 → 0
         _, d = self.strategy._score_long(current_price=49800.0, current_open=50000.0, **base_kwargs)
         assert d["bull_candle"] == 0
 
+        # 도지 (양봉이지만 body=5 < min_body=75) → 0
+        _, d = self.strategy._score_long(current_price=50005.0, current_open=50000.0, **base_kwargs)
+        assert d["bull_candle"] == 0
+
     def test_bear_candle_condition(self):
-        """음봉 (close < open) 시 bear_candle=1."""
+        """음봉 + 바디 > 0.15×ATR 시 bear_candle=1 (도지 제외)."""
+        # ltf_atr=500, min_body=500*0.15=75
         base_kwargs = dict(
             current_vol=100.0, avg_vol=200.0,
             ltf_ema9=49800.0, ltf_ema21=50100.0, ltf_atr=500.0, ltf_rsi=48.0,
@@ -582,12 +588,16 @@ class TestScalpingStrategyScoreDetails:
             htf_vwap=0.0, htf_price=0.0, has_htf=False,
             funding_rate=0.0, spread_pct=0.001,
         )
-        # 음봉
+        # 음봉 + body=200 > min_body=75 → +1
         _, d = self.strategy._score_short(current_price=49800.0, current_open=50000.0, **base_kwargs)
         assert d["bear_candle"] == 1
 
-        # 양봉
+        # 양봉 → 0
         _, d = self.strategy._score_short(current_price=50100.0, current_open=49900.0, **base_kwargs)
+        assert d["bear_candle"] == 0
+
+        # 도지 (음봉이지만 body=5 < min_body=75) → 0
+        _, d = self.strategy._score_short(current_price=49995.0, current_open=50000.0, **base_kwargs)
         assert d["bear_candle"] == 0
 
     def test_price_in_zone_condition(self):
@@ -808,8 +818,8 @@ class TestScalpingStrategyMaxScore:
         """모든 롱 조건 충족 시 최대 점수 9."""
         score, details = self.strategy._score_long(
             current_price=50300.0,    # EMA21 근처, 양봉
-            current_open=50200.0,    # close > open (양봉)
-            current_vol=300.0,       # 1.5× avg_vol
+            current_open=50100.0,    # close > open, body=200 > min_body(500*0.15=75) ✓
+            current_vol=300.0,       # 1.5× avg_vol ✓
             avg_vol=200.0,
             ltf_ema9=50400.0,        # EMA9 > EMA21 ✓
             ltf_ema21=50000.0,

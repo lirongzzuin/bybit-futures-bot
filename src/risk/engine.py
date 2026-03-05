@@ -304,13 +304,13 @@ class RiskEngine:
         tp1_move_pct = (atr * tp1_atr_mult) / entry_price
 
         # ── 모드별 수수료 안전 배수 ──────────────────────────────────────────
-        # PURE_SCALP (3분봉): TP1=1.5×ATR — 타이트, 배수 낮춰야 과도한 필터 방지
-        #   PostOnly: 0.080%×1.5 = 0.120% → ATR >= 0.08% 필요
-        #   Market:   0.115%×1.5 = 0.173% → ATR >= 0.115% 필요
+        # PURE_SCALP (3분봉): TP1=2.0×ATR — R:R 2:1 (개선)
+        #   PostOnly: 0.080%×1.5 = 0.120% → ATR >= 0.060% 필요
+        #   Market:   0.115%×1.5 = 0.173% → ATR >= 0.087% 필요
         # SCALP/TREND_RIDE (15분봉): TP1=2.5-4.0×ATR — 여유 있음, 2.0× 유지
         #   PostOnly: 0.080%×2.0 = 0.160% → ATR >= 0.064% 필요
         if resolved_mode == "PURE_SCALP":
-            fee_safety_multiplier = 1.5   # 3분봉 스캘핑: 1.5× (여전히 수수료의 1.5배 확보)
+            fee_safety_multiplier = 1.5   # 3분봉 스캘핑: 1.5× (수수료의 1.5배 확보)
         else:
             fee_safety_multiplier = 2.0   # 15분봉 스윙/SCALP: 2.0× (보수적)
 

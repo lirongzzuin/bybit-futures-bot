@@ -657,15 +657,32 @@ class TestRiskGuards:
         result = self._check(equity=8900, weekly_pnl=-1100)  # 11% weekly
         assert result.action == GuardAction.ALLOW
 
-    def test_max_drawdown_halt(self):
-        # MAX_DRAWDOWN_PCT=0.30: (10000-6900)/10000 = 31% > 30% → HALT
-        result = self._check(equity=6900, peak_equity=10000)  # 31% DD
+    def test_max_drawdown_triggers_reduce(self):
+        # 새 계층 시스템: 31% DD → HALT 아닌 REDUCE (포지션 비중 축소 후 회복 거래 허용)
+        # 실제 HALT는 HALT_DRAWDOWN_PCT (기본 50%)에서 발동
+        result = self._check(equity=6900, peak_equity=10000)  # 31% DD > MAX_DRAWDOWN_PCT(30%)
+        assert result.action == GuardAction.REDUCE
+        assert result.reduce_pct > 0.70  # heavy reduction (75%+)
+
+    def test_extreme_drawdown_triggers_halt(self):
+        # 52% DD → HALT (HALT_DRAWDOWN_PCT=0.50 초과)
+        result = self._check(equity=4800, peak_equity=10000)  # 52% DD
         assert result.action == GuardAction.HALT
 
+    def test_heavy_drawdown_pauses_new_entries(self):
+        # 43% DD → PAUSE (PAUSE_DRAWDOWN_PCT=0.42 초과, HALT_DRAWDOWN_PCT 미달)
+        result = self._check(equity=5700, peak_equity=10000)  # 43% DD
+        assert result.action == GuardAction.PAUSE
+
     def test_moderate_drawdown_reduce(self):
-        # 15% drawdown → REDUCE (70% of 20% limit)
+        # 15% DD < reduce_limit(21%) → ALLOW (감쇠 없음)
         result = self._check(equity=8500, peak_equity=10000)  # 15% DD
-        assert result.action in (GuardAction.REDUCE, GuardAction.ALLOW)
+        assert result.action == GuardAction.ALLOW
+
+    def test_drawdown_at_reduce_limit_triggers_reduce(self):
+        # 22% DD > reduce_limit(21%) → REDUCE
+        result = self._check(equity=7800, peak_equity=10000)  # 22% DD
+        assert result.action == GuardAction.REDUCE
 
     def test_extreme_spread_pauses(self):
         result = self._check(spread_pct=0.015)

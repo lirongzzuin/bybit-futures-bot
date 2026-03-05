@@ -31,6 +31,11 @@ Pure Scalping Strategy — EMA Ribbon + VWAP + RSI Momentum Scalping
   score < URGENT_SCORE:    strength = min(0.89, base)  → PostOnly 선호
   → score=5: 0.60, score=6: 0.67, score=7~9: 0.91
 
+하드 필터 (진입 품질 강화):
+  HTF EMA 방향 일치: has_htf 시 HTF EMA9/EMA21 방향이 진입 방향과 일치해야 진입
+  EMA50 방향 필터:  롱은 가격 > EMA50, 숏은 가격 < EMA50 (트렌드 방향 확인)
+  캔들 품질 필터:   body > 0.15×ATR (도지/방향성 없는 캔들 제외)
+
 수수료 최적화:
   score < URGENT_SCORE AND spread < 0.2%: PostOnly 지정가 (Maker 0.020%)
   score ≥ URGENT_SCORE OR spread > 0.2%: 시장가 (Taker 0.055%)
@@ -252,6 +257,41 @@ class ScalpingStrategy:
             )
             return self._neutral(), ltf_atr
 
+        # ── 하드 필터 1: HTF EMA 방향 일치 (다중 타임프레임 정렬 보장) ─────────
+        # HTF 데이터 있을 때 HTF EMA 방향이 진입 방향과 반드시 일치해야 함
+        # 반례: LTF 상승 but HTF 하락 → 상위 추세 역행 → 거부
+        if has_htf and htf_ema9 > 0 and htf_ema21 > 0:
+            htf_bullish = htf_ema9 > htf_ema21
+            if direction == 1 and not htf_bullish:
+                log.debug(
+                    "ScalpStrategy: HTF EMA bearish → long rejected (htf_ema9=%.2f htf_ema21=%.2f)",
+                    htf_ema9, htf_ema21,
+                )
+                return self._neutral(), ltf_atr
+            if direction == -1 and htf_bullish:
+                log.debug(
+                    "ScalpStrategy: HTF EMA bullish → short rejected (htf_ema9=%.2f htf_ema21=%.2f)",
+                    htf_ema9, htf_ema21,
+                )
+                return self._neutral(), ltf_atr
+
+        # ── 하드 필터 2: EMA50 방향 필터 (느린 추세 방향 확인) ─────────────────
+        # EMA50 위에서 롱, EMA50 아래에서 숏 → 상위 모멘텀 확인
+        # 0.2% 버퍼: 극단적 이탈만 거부 (EMA50 근접 구간은 허용)
+        if ltf_ema50 > 0 and not np.isnan(ltf_ema50):
+            if direction == 1 and current_price < ltf_ema50 * 0.998:
+                log.debug(
+                    "ScalpStrategy: Price %.2f below EMA50 %.2f → long rejected",
+                    current_price, ltf_ema50,
+                )
+                return self._neutral(), ltf_atr
+            if direction == -1 and current_price > ltf_ema50 * 1.002:
+                log.debug(
+                    "ScalpStrategy: Price %.2f above EMA50 %.2f → short rejected",
+                    current_price, ltf_ema50,
+                )
+                return self._neutral(), ltf_atr
+
         # ── 신호 강도 매핑 (엔진 티어 경계 정렬) ─────────────────────────────
         # _SCORE_STRENGTH_MAP: 각 score가 별도 레버리지 티어에 속하도록 명시적 매핑
         # score 5→0.60(2-3×), 6→0.69(4-5×), 7→0.77(8-10×), 8→0.83(15-18×)
@@ -424,9 +464,11 @@ class ScalpingStrategy:
         vol_mult = self._s.SCALP_PURE_VOLUME_MULT
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
-        # ── 캔들 방향 (최대 +1) ────────────────────────────────────────────
-        # +1: 마지막 봉이 양봉 (close > open)
-        d["bull_candle"] = 1 if current_price > current_open else 0
+        # ── 캔들 방향/품질 (최대 +1) ───────────────────────────────────────
+        # +1: 양봉이면서 캔들 바디 > 0.15×ATR (도지/스피닝탑 제외 — 방향성 확인)
+        candle_body = abs(current_price - current_open)
+        min_body = ltf_atr * 0.15
+        d["bull_candle"] = 1 if (current_price > current_open and candle_body >= min_body) else 0
 
         # ── 패널티 ────────────────────────────────────────────────────────
         # -1: 펀딩 비율 과다 (한쪽 포지션 쏠림 위험)
@@ -484,8 +526,11 @@ class ScalpingStrategy:
         vol_mult = self._s.SCALP_PURE_VOLUME_MULT
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
-        # ── 캔들 방향 (음봉) ───────────────────────────────────────────────
-        d["bear_candle"] = 1 if current_price < current_open else 0
+        # ── 캔들 방향/품질 (음봉) ──────────────────────────────────────────
+        # +1: 음봉이면서 캔들 바디 > 0.15×ATR (방향성 있는 음봉만 인정)
+        candle_body_s = abs(current_price - current_open)
+        min_body_s = ltf_atr * 0.15
+        d["bear_candle"] = 1 if (current_price < current_open and candle_body_s >= min_body_s) else 0
 
         # ── 패널티 ────────────────────────────────────────────────────────
         d["adverse_funding"] = -1 if abs(funding_rate) > 0.001 else 0

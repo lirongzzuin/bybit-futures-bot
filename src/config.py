@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     MAX_RISK_PER_TRADE_PCT: float = 0.02       # 2% equity risk per trade (aggressive compounding)
     MAX_DAILY_LOSS_PCT: float = 0.08           # 8% → Slack 알림 (거래 중지 없음)
     MAX_WEEKLY_LOSS_PCT: float = 0.15          # 15% → Slack 알림 (거래 중지 없음)
-    MAX_DRAWDOWN_PCT: float = 0.30             # 30% → HALT (계좌 보호 핵심)
+    MAX_DRAWDOWN_PCT: float = 0.30             # 30% → REDUCE 트리거 (포지션 비중 축소 시작)
+    PAUSE_DRAWDOWN_PCT: float = 0.42           # 42% → PAUSE (신규 진입 중단, 기존 포지션 관리)
+    HALT_DRAWDOWN_PCT: float = 0.50            # 50% → HALT (긴급 전면 중단 — 계좌 보호 핵심)
     MAX_LEVERAGE_CAP: int = 20                 # 20× max leverage (백테스트: PF=1.001 최적값)
     MAX_CONCURRENT_POSITIONS: int = 2
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
@@ -70,20 +72,20 @@ class Settings(BaseSettings):
     SCALP_PURE_EMA_SLOW: int = 50
     # RSI 진입 구간
     SCALP_PURE_RSI_PERIOD: int = 14
-    SCALP_PURE_RSI_LONG_MIN: float = 40.0     # 롱: RSI 40 이상 (모멘텀 형성)
-    SCALP_PURE_RSI_LONG_MAX: float = 65.0     # 롱: RSI 65 이하 (과매수 회피)
-    SCALP_PURE_RSI_SHORT_MIN: float = 35.0    # 숏: RSI 35 이상
-    SCALP_PURE_RSI_SHORT_MAX: float = 60.0    # 숏: RSI 60 이하 (과매도 회피)
+    SCALP_PURE_RSI_LONG_MIN: float = 42.0     # 롱: RSI 42 이상 (모멘텀 형성, 과매도 회피)
+    SCALP_PURE_RSI_LONG_MAX: float = 62.0     # 롱: RSI 62 이하 (과매수 회피, 타이트)
+    SCALP_PURE_RSI_SHORT_MIN: float = 38.0    # 숏: RSI 38 이상 (과매도 반등 회피)
+    SCALP_PURE_RSI_SHORT_MAX: float = 58.0    # 숏: RSI 58 이하 (타이트, 과매수 회피)
     # 진입 조건
-    SCALP_PURE_VOLUME_MULT: float = 1.2       # 볼륨 확인: 평균 대비 1.2배 이상
+    SCALP_PURE_VOLUME_MULT: float = 1.3       # 볼륨 확인: 평균 대비 1.3배 이상 (품질 강화)
     SCALP_PURE_EMA_ZONE_ATR: float = 1.0      # EMA 존 범위: EMA20 ± 1.0×ATR
-    SCALP_PURE_ENTRY_MIN_SCORE: int = 5       # 진입 최소 점수 (9점 만점)
+    SCALP_PURE_ENTRY_MIN_SCORE: int = 6       # 진입 최소 점수 (9점 만점, HTF+LTF EMA 정렬 보장)
     SCALP_PURE_ENTRY_URGENT_SCORE: int = 9    # 긴급 진입 점수 → 시장가 선호 (최고 점수만)
     # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
     SCALP_PURE_STOP_ATR: float = 1.0          # SL: 1.0× ATR (타이트 — 빠른 손절)
-    SCALP_PURE_TP1_ATR: float = 1.5           # TP1: 1.5× ATR (R:R 1.5:1)
-    SCALP_PURE_TP2_ATR: float = 3.0           # TP2: 3.0× ATR (R:R 3:1, 트레일링)
-    SCALP_PURE_MAX_BARS: int = 20             # 최대 보유: 3분봉×20 = 60분
+    SCALP_PURE_TP1_ATR: float = 2.0           # TP1: 2.0× ATR (R:R 2.0:1 — 개선)
+    SCALP_PURE_TP2_ATR: float = 4.5           # TP2: 4.5× ATR (R:R 4.5:1 — 개선, 더 큰 수익 극대화)
+    SCALP_PURE_MAX_BARS: int = 30             # 최대 보유: 3분봉×30 = 90분 (TP2 도달 시간 충분히)
     SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.50 # TP1에서 50% 청산, 50% 유지
 
     # ── Signal Quality Filters (15분봉 기준 최적화) ─────────────────
@@ -147,7 +149,7 @@ class Settings(BaseSettings):
     # ── Order Execution ───────────────────────────────────────
     LIMIT_ORDER_TIMEOUT_SECONDS: int = 30
     LIMIT_ORDER_MAX_RETRIES: int = 3
-    REENTRY_COOLDOWN_SECONDS: int = 900        # 15 min = 1 full bar on 15m timeframe
+    REENTRY_COOLDOWN_SECONDS: int = 600        # 10 min — 스캘핑 모드 재진입 대기 (3m × 3~4봉)
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
     # 신호 강도가 이 값 초과 시 지정가 대신 시장가(즉시 체결 우선)
     SIGNAL_URGENT_THRESHOLD: float = 0.90  # > 0.90 → market order (urgency)
