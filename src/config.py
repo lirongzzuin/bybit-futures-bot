@@ -147,8 +147,8 @@ class Settings(BaseSettings):
     ICT_RANGE_PERIOD: int = 20             # bars for premium/discount range
 
     # ── Order Execution ───────────────────────────────────────
-    LIMIT_ORDER_TIMEOUT_SECONDS: int = 30
-    LIMIT_ORDER_MAX_RETRIES: int = 3
+    LIMIT_ORDER_TIMEOUT_SECONDS: int = 15   # 15s/시도 (스캘핑: 빠른 진입이 중요)
+    LIMIT_ORDER_MAX_RETRIES: int = 2        # 2회 후 시장가 폴백 (총 최대 ~30s)
     REENTRY_COOLDOWN_SECONDS: int = 600        # 10 min — 스캘핑 모드 재진입 대기 (3m × 3~4봉)
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
     # 신호 강도가 이 값 초과 시 지정가 대신 시장가(즉시 체결 우선)

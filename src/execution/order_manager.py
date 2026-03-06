@@ -349,6 +349,19 @@ class OrderManager:
                     managed.symbol, managed.side, f"retry-{attempt}-{int(time.time())}"
                 )
 
+            # 재시도 시 현재 호가 갱신 (stale price로 계속 타임아웃 방지)
+            if attempt > 1 and not self._s.is_dry_run():
+                try:
+                    ob = self._client.get_orderbook(managed.symbol, limit=1)
+                    bids = ob.get("b", [])
+                    asks = ob.get("a", [])
+                    if direction == 1 and bids:
+                        current_price = float(bids[0][0])
+                    elif direction == -1 and asks:
+                        current_price = float(asks[0][0])
+                except Exception as _e:
+                    log.debug("Price refresh failed on retry %d: %s", attempt, _e)
+
             # Quote at current best
             offset = symbol_info.get("price_step", 0.01)
             if direction == 1:
