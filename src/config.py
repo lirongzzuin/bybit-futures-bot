@@ -14,9 +14,21 @@ class Settings(BaseSettings):
     TRADING_MODE: Literal["dry-run", "paper", "live"] = "dry-run"
 
     # ── Strategy Selection ────────────────────────────────────
-    # "swing": 현재 15분봉 기반 스윙/추세추종 전략 (기본값)
-    # "scalp": 3분봉 기반 EMA Ribbon+VWAP+RSI 순수 스캘핑 전략
-    STRATEGY_MODE: Literal["swing", "scalp", "trend"] = "swing"
+    # "swing": 15분봉 기반 스윙/추세추종 전략 (ICT + 복합 신호)
+    # "scalp": 3분봉 기반 EMA Ribbon+VWAP+RSI 순수 스캘핑
+    # "trend": Phase-locked direction TrendEMA 전략
+    # "auto":  Dynamic Regime Router — 매 사이클 장세 자동 감지 후 최적 전략 선택
+    STRATEGY_MODE: Literal["swing", "scalp", "trend", "auto"] = "swing"
+
+    # ── Dynamic Regime Router (STRATEGY_MODE=auto) ────────────
+    # ADX 강세 임계값 → STRONG_BULL/STRONG_BEAR (TREND_RIDE 모드)
+    REGIME_ROUTER_ADX_STRONG: float = 27.0
+    # ADX 보통 추세 임계값 → BULL/BEAR (SCALP 모드)
+    REGIME_ROUTER_ADX_MODERATE: float = 18.0
+    # ATR 백분위 임계값 — 이 이상이면 VOLATILE (포지션 50% 축소)
+    REGIME_ROUTER_ATR_VOLATILE_PCT: float = 0.82
+    # 레짐 그룹 간 전환 확정에 필요한 연속 감지 횟수 (그룹 내 전환은 즉시)
+    REGIME_ROUTER_CONFIRM_BARS: int = 3
 
     # ── Bybit API ─────────────────────────────────────────────
     BYBIT_API_KEY: str = ""

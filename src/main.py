@@ -46,6 +46,7 @@ from src.strategy.scalp import TradeModeDetector
 from src.strategy.scalping import ScalpingStrategy
 from src.strategy.trend_ema import TrendEMAStrategy
 from src.strategy.signals import SignalGenerator
+from src.strategy.regime_router import RegimeRouter, DynamicRegime
 
 log = get_logger(__name__)
 
@@ -69,6 +70,7 @@ class TradingBot:
         self._mode_detector = TradeModeDetector(settings)
         self._scalp_strategy = ScalpingStrategy(settings)
         self._trend_strategy = TrendEMAStrategy(settings)
+        self._regime_router  = RegimeRouter(settings)
         self._risk_engine = RiskEngine(settings)
         self._guards = RiskGuards(settings)
         self._state_machine = StateMachine(settings)
@@ -90,6 +92,11 @@ class TradingBot:
         # 연속 신호 카운터 (확정 전환을 위한 디바운스)
         self._macro_bull_streak: int = 0    # 연속 BULL 신호 횟수
         self._macro_bear_streak: int = 0    # 연속 non-BULL 신호 횟수
+
+        # Auto regime router per-symbol cache (STRATEGY_MODE=auto)
+        self._auto_risk_multiplier: Dict[str, float] = {}
+        self._auto_leverage_cap: Dict[str, int] = {}
+        self._auto_direction_bias: Dict[str, int] = {}
 
         # Paper capital tracking
         self._paper_equity = settings.PAPER_CAPITAL_USDT
@@ -185,6 +192,8 @@ class TradingBot:
             result = self._collect_and_signal_scalp(symbol)
         elif settings.STRATEGY_MODE == "trend":
             result = self._collect_and_signal_trend(symbol)
+        elif settings.STRATEGY_MODE == "auto":
+            result = self._collect_and_signal_auto(symbol)
         else:
             result = self._collect_and_signal_swing(symbol)
 
@@ -236,7 +245,7 @@ class TradingBot:
 
         if not pos.is_flat:
             # 보유 봉 수 계산 (전략별 타임프레임 기준)
-            bar_minutes = int(settings.SCALP_PURE_LTF_TIMEFRAME) if settings.STRATEGY_MODE == "scalp" \
+            bar_minutes = int(settings.SCALP_PURE_LTF_TIMEFRAME) if settings.STRATEGY_MODE in ("scalp", "auto") \
                 else int(settings.SIGNAL_TIMEFRAME)
             bars_in_trade = int((time.time() - pos.entry_ts) / (bar_minutes * 60))
 
@@ -318,6 +327,30 @@ class TradingBot:
         if not risk_params.risk_ok:
             log.debug("Risk check failed for %s: %s", symbol, risk_params.reason)
             return
+
+        # ── Auto mode: 레짐 라우터 리스크 스케일 적용 ────────────────────────
+        # direction_bias 필터 (이미 _collect_and_signal_auto에서 1차 필터링하지만
+        # 여기서도 방어적으로 체크)
+        if settings.STRATEGY_MODE == "auto":
+            auto_bias = self._auto_direction_bias.get(symbol, 0)
+            if auto_bias == +1 and combined.direction == -1:
+                log.debug("Auto regime: SHORT 신호 차단 (LONG-only 레짐) %s", symbol)
+                return
+            elif auto_bias == -1 and combined.direction == +1:
+                log.debug("Auto regime: LONG 신호 차단 (SHORT-only 레짐) %s", symbol)
+                return
+
+            rm = self._auto_risk_multiplier.get(symbol, 1.0)
+            lc = self._auto_leverage_cap.get(symbol, int(settings.MAX_LEVERAGE_CAP))
+
+            if rm < 1.0:
+                risk_params.qty_base           *= rm
+                risk_params.position_size_usdt *= rm
+                risk_params.margin_usdt        *= rm
+                risk_params.max_loss_usdt      *= rm
+
+            if lc < risk_params.leverage:
+                risk_params.leverage = lc
 
         # ── Recovery mode: 포지션 비중 축소 적용 ────────────────────────────
         # REDUCE 가드 발동 시 계산된 포지션 사이즈를 비례 축소
@@ -479,6 +512,112 @@ class TradingBot:
         # RANGING 국면은 PURE_SCALP(TP1=1.5×ATR, stop=1.0×ATR)으로 타이트 mean reversion
         trade_mode_str = "SCALP" if combined.regime != Regime.RANGING else "PURE_SCALP"
         return snap, combined, atr_val, regime_r, trade_mode_str
+
+    def _collect_and_signal_auto(self, symbol: str):
+        """
+        Dynamic Regime Router 모드 — 매 사이클 장세를 자동 감지하고 최적 전략을 선택.
+
+        장세별 라우팅:
+          STRONG_BULL → TrendEMA, LONG only, TREND_RIDE (넓은 TP로 추세 극대화)
+          BULL        → TrendEMA, LONG only, SCALP (빠른 TP)
+          SIDEWAYS    → Scalping, 양방향, PURE_SCALP (mean reversion)
+          BEAR        → TrendEMA, SHORT only, SCALP
+          STRONG_BEAR → TrendEMA, SHORT only, TREND_RIDE
+          VOLATILE    → Scalping, 양방향, PURE_SCALP (사이즈 50% 축소)
+          TRANSITION  → 진입 없음 (레짐 전환 확정 중)
+
+        Returns (snap, combined, atr_val, regime_r, trade_mode_str) or None
+        """
+        from src.strategy.regime import RegimeResult, Regime
+
+        snap = self._collector.collect_for_scalp(symbol, limit=500)
+        if snap.ohlcv.empty or len(snap.ohlcv) < 50:
+            log.warning("Auto: LTF 데이터 부족 %s (%d봉)", symbol, len(snap.ohlcv))
+            return None
+
+        # ── 레짐 감지 ────────────────────────────────────────────────────────
+        is_macro_bear = (self._macro_mode == "BEAR_SIDEWAYS")
+        router_result = self._regime_router.detect(
+            symbol=symbol,
+            mtf_df=snap.trend_ohlcv,
+            macro_bear=is_macro_bear,
+        )
+
+        log.info(
+            "Auto regime %s: %s → strategy=%s mode=%s bias=%+d "
+            "risk_mult=%.2f lev_cap=%d (conf=%.2f | %s)",
+            symbol, router_result.regime.value,
+            router_result.strategy, router_result.trade_mode,
+            router_result.direction_bias,
+            router_result.risk_multiplier, router_result.leverage_cap,
+            router_result.confidence, router_result.reason,
+        )
+
+        # TRANSITION: 레짐 전환 확정 중 → 진입 없음
+        if router_result.strategy == "skip":
+            return None
+
+        # ── 심볼별 리스크 파라미터 저장 (_process_symbol에서 사용) ─────────────
+        self._auto_risk_multiplier[symbol] = router_result.risk_multiplier
+        self._auto_leverage_cap[symbol]    = router_result.leverage_cap
+        self._auto_direction_bias[symbol]  = router_result.direction_bias
+
+        # ── 전략 라우팅 ───────────────────────────────────────────────────────
+        if router_result.strategy == "trend":
+            combined, atr_val = self._trend_strategy.generate(
+                ltf_df=snap.ohlcv,
+                htf_df=snap.trend_ohlcv,
+                vwap_val=snap.vwap,
+                funding_rate=snap.funding_rate,
+                spread_pct=snap.orderbook.spread_pct,
+                oi_change_pct=snap.oi_change_pct,
+            )
+        else:
+            # scalp
+            combined, atr_val = self._scalp_strategy.generate(
+                ltf_df=snap.ohlcv,
+                htf_df=snap.trend_ohlcv,
+                vwap_val=snap.vwap,
+                funding_rate=snap.funding_rate,
+                spread_pct=snap.orderbook.spread_pct,
+                oi_change_pct=snap.oi_change_pct,
+            )
+
+        # ── 방향 바이어스 1차 필터 ────────────────────────────────────────────
+        if router_result.direction_bias != 0 and combined.direction != 0:
+            if combined.direction != router_result.direction_bias:
+                log.debug(
+                    "Auto: %s %s 신호 차단 (레짐=%s, bias=%+d)",
+                    symbol,
+                    "LONG" if combined.direction == 1 else "SHORT",
+                    router_result.regime.value,
+                    router_result.direction_bias,
+                )
+                return None
+
+        # ── regime_r 생성 (check_exit 레짐플립 감지용) ───────────────────────
+        if combined.direction == 1:
+            regime_obj = Regime.TRENDING_UP
+        elif combined.direction == -1:
+            regime_obj = Regime.TRENDING_DOWN
+        else:
+            regime_obj = Regime.RANGING
+
+        regime_r = RegimeResult(
+            regime=regime_obj,
+            confidence=router_result.confidence,
+            adx_val=0.0,
+            plus_di=0.0,
+            minus_di=0.0,
+            ema_aligned_up=(router_result.direction_bias == +1),
+            ema_aligned_down=(router_result.direction_bias == -1),
+            vol_percentile=0.5,
+            volume_ratio=1.0,
+            trend_score=float(router_result.direction_bias),
+        )
+
+        # trade_mode는 레짐 라우터 테이블에서 결정 (전략 자체가 아니라)
+        return snap, combined, atr_val, regime_r, router_result.trade_mode
 
     # ── Order Execution ───────────────────────────────────────────────────────
 
