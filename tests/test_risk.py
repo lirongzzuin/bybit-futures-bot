@@ -366,13 +366,14 @@ class TestHighLeverageMode:
         return engine.calculate(**defaults)
 
     def test_ultra_high_signal_achieves_50x(self):
-        """시그널 0.85 + BEAR 모드 + ATR 0.5% → 고배율 달성."""
+        """시그널 0.90 + BEAR 모드 + ATR 0.5% → 적정 배율 달성 (최소 플로어 적용 후)."""
         engine = self._make_engine()
         result = self._calc(engine, signal_strength=0.90)
         assert result.risk_ok, result.reason
-        # base_lev = 10% / (1.5 × 0.5% × 0.40) = 10% / 0.30% = 33.3× (sig_mod 감소 후 ~30×)
-        # 드로우다운 0% → dd_escalation_allowed=True, 안전화된 파라미터로도 30× 달성
-        assert result.leverage >= 25, f"Expected ≥25×, got {result.leverage}×"
+        # stop_atr_scale=0.65 → stop=1.5×0.5%×0.65=0.4875%,  min_floor=0.7% → floor 적용
+        # base_lev = 16% / 0.7% = 22.9× (dampening 후 ~16×)
+        # 넓어진 스탑으로 노이즈 터짐 방지 → 레버리지는 적정 수준으로 조정됨
+        assert result.leverage >= 12, f"Expected ≥12×, got {result.leverage}×"
 
     def test_signal_tiers_ascending_leverage(self):
         """시그널 강도 증가 → 레버리지 단조 증가."""
@@ -385,8 +386,8 @@ class TestHighLeverageMode:
         assert levs[0.75] >= levs[0.65]
         assert levs[0.85] >= levs[0.75]
 
-    def test_tight_stop_produces_good_rr(self):
-        """strength=0.85: 타이트 스탑(0.35×ATR) + 정상 TP(2.5×ATR) → R:R ≥ 4."""
+    def test_stop_floor_produces_maintained_rr(self):
+        """strength=0.85: 최소 스탑 플로어 적용 → TP 비례 스케일업 → R:R 유지."""
         engine = self._make_engine()
         entry = 50000.0
         atr = 250.0   # 0.5% of price
@@ -395,8 +396,12 @@ class TestHighLeverageMode:
         stop_dist = entry - result.stop_price   # entry - stop
         tp1_dist = result.tp1_price - entry
         rr = tp1_dist / stop_dist if stop_dist > 0 else 0
-        # stop = 0.35×1.5×250=131.25, TP1 = 2.5×250=625 → R:R = 625/131.25 = 4.76
-        assert rr >= 4.0, f"R:R too low: {rr:.2f}"
+        # stop_atr_scale=0.65 → raw_stop=1.5×0.65×250=243.75, min_floor=0.7%×50000=350
+        # floor 적용: stop=350, tp_scale=350/243.75=1.44
+        # TP1 = 2.5×250×1.44=899.7 → R:R = 899.7/350 = 2.57
+        # TP1/stop = tp1_atr_mult / (stop_atr_mult × stop_atr_scale) = 2.5/(1.5×0.65) = 2.56
+        assert rr >= 2.0, f"R:R too low: {rr:.2f}"
+        assert stop_dist >= entry * 0.007 * 0.99, "Stop should be at/near minimum floor"
 
     def test_low_signal_stays_conservative(self):
         """약한 시그널(0.55)은 낮은 레버리지 유지."""

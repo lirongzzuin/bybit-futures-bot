@@ -113,15 +113,15 @@ class RiskEngine:
 
         # ── Signal-driven leverage escalation ─────────────────────────────────
         # 핵심 원리: base_leverage = trade_risk_pct / stop_distance_pct
-        #   → 강한 시그널: 타이트 스탑(stop_atr_scale↓) + 높은 리스크%(trade_risk↑)
-        #   → 두 효과가 곱해져 높은 레버리지 자연 달성
+        #   → 강한 시그널: 넉넉한 스탑(stop_atr_scale) + 높은 리스크%(trade_risk↑)
+        #   → 최소 스탑 플로어 적용 후 실제 레버리지가 결정됨
         #
-        # 실제 ATR=1.0% 기준 예시 (SCALP_STOP=1.2×, 이후 감쇠 ×0.88):
-        #   strength=0.85: stop=0.35×1.2×1.0%=0.42%,  risk=16% → base=38×, 실제≈20×(캡)
-        #   strength=0.80: stop=0.50×1.2×1.0%=0.60%,  risk=12% → base=20×, 실제≈18×
-        #   strength=0.75: stop=0.65×1.2×1.0%=0.78%,  risk= 9% → base=11.5×, 실제≈10×
-        #   strength=0.65: stop=0.80×1.2×1.0%=0.96%,  risk= 6% → base= 6.3×, 실제≈ 5×
-        #   default:       stop=1.00×1.2×1.0%=1.20%,  risk= 4% → base= 3.3×, 실제≈ 2-3×
+        # 실제 ATR=1.0% 기준 예시 (SCALP_STOP=1.5×, MIN_STOP_SCALP=0.7%):
+        #   strength=0.85: stop=max(0.65×1.5×1%=0.975%, 0.7%)=0.975%, risk=16% → base=16×, 실제≈15-16×
+        #   strength=0.80: stop=max(0.75×1.5×1%=1.125%, 0.7%)=1.125%, risk=12% → base=10.7×, 실제≈10×
+        #   strength=0.75: stop=max(0.85×1.5×1%=1.275%, 0.7%)=1.275%, risk= 9% → base= 7.1×, 실제≈ 7×
+        #   strength=0.65: stop=max(0.92×1.5×1%=1.380%, 0.7%)=1.380%, risk= 6% → base= 4.3×, 실제≈ 4×
+        #   default:       stop=max(1.00×1.5×1%=1.500%, 0.7%)=1.500%, risk= 4% → base= 2.7×, 실제≈ 2-3×
         # ── Signal-driven risk escalation ─────────────────────────────────────
         # 드로우다운이 높을수록 에스컬레이션 자동 억제 (안전 장치)
         # drawdown_pct > 0.15: 에스컬레이션 비활성화 (기본 risk만 사용)
@@ -129,25 +129,42 @@ class RiskEngine:
 
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
         if signal_strength >= 0.85 and dd_escalation_allowed:
-            stop_atr_scale = 0.35           # 매우 타이트 스탑 → 최고 레버리지
-            trade_risk_pct = min(0.16, target_risk * 8.0)   # 목표 레버리지: ~20× (캡)
+            stop_atr_scale = 0.65           # 넉넉한 스탑 → 노이즈 터짐 방지
+            trade_risk_pct = min(0.16, target_risk * 8.0)   # 목표 레버리지: ~15-20× (캡)
         elif signal_strength >= 0.80 and dd_escalation_allowed:
-            stop_atr_scale = 0.50
-            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~15-18×
+            stop_atr_scale = 0.75
+            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~10-12×
         elif signal_strength >= 0.75 and dd_escalation_allowed:
-            stop_atr_scale = 0.65
-            trade_risk_pct = min(0.09, target_risk * 4.5)   # 목표 레버리지: ~8-10×
+            stop_atr_scale = 0.85
+            trade_risk_pct = min(0.09, target_risk * 4.5)   # 목표 레버리지: ~7-9×
         elif signal_strength >= 0.65:
-            stop_atr_scale = 0.80
+            stop_atr_scale = 0.92
             trade_risk_pct = min(0.06, target_risk * 3.0)   # 목표 레버리지: ~4-5×
         else:
             stop_atr_scale = 1.00
             trade_risk_pct = min(0.04, target_risk * 2.0)   # 기본값: ~2-3×
 
-        # ── Step 1: Stop distance (signal-scaled) ─────────────────────────────
-        # TP prices는 FULL ATR 배수 사용 → tight stop + large TP = 우수한 R:R
-        # 예: strength=0.85 → stop=0.375× ATR, TP1=2.5× ATR → R:R = 6.7:1
+        # ── Step 1: Stop distance (signal-scaled + minimum floor) ─────────────
+        # 기본: ATR × 배수 × 신호스케일
+        # 최소 플로어: 타임프레임 노이즈 대비 최소 스탑 거리 보장
+        #   → 3분봉 ATR은 15분봉보다 ~3× 작으므로 TREND_RIDE 모드에서 특히 중요
+        #   → 플로어 적용 시 TP도 동일 비율 스케일업 → R:R 유지
         stop_distance = atr * stop_atr_mult * stop_atr_scale
+
+        # 모드별 최소 스탑 거리 플로어
+        _min_stop_pct_map = {
+            "PURE_SCALP": self._s.MIN_STOP_PCT_PURE_SCALP,
+            "SCALP":      self._s.MIN_STOP_PCT_SCALP,
+            "TREND_RIDE": self._s.MIN_STOP_PCT_TREND_RIDE,
+        }
+        min_stop_pct = _min_stop_pct_map.get(resolved_mode, self._s.MIN_STOP_PCT_SCALP)
+        min_stop_dist = entry_price * min_stop_pct
+        if stop_distance < min_stop_dist:
+            tp_scale = min_stop_dist / stop_distance  # TP 비례 스케일업으로 R:R 유지
+            stop_distance = min_stop_dist
+        else:
+            tp_scale = 1.0
+
         stop_distance_pct = stop_distance / entry_price
 
         if stop_distance_pct <= 0:
@@ -267,14 +284,15 @@ class RiskEngine:
         max_loss = qty_base * stop_distance  # = equity × risk_pct (by design)
 
         # ── Step 6: Stop / TP prices ──────────────────────────────────────────
+        # TP는 tp_scale 적용: 플로어로 스탑이 확대된 경우 TP도 비례 확대 → R:R 유지
         if side == "Buy":
             stop_price = entry_price - stop_distance
-            tp1_price = entry_price + atr * tp1_atr_mult
-            tp_price = entry_price + atr * tp2_atr_mult   # TP2 = full close target
+            tp1_price = entry_price + atr * tp1_atr_mult * tp_scale
+            tp_price = entry_price + atr * tp2_atr_mult * tp_scale
         else:
             stop_price = entry_price + stop_distance
-            tp1_price = entry_price - atr * tp1_atr_mult
-            tp_price = entry_price - atr * tp2_atr_mult
+            tp1_price = entry_price - atr * tp1_atr_mult * tp_scale
+            tp_price = entry_price - atr * tp2_atr_mult * tp_scale
 
         # ── Step 7: Minimum notional check ────────────────────────────────────
         min_notional = symbol_info.get("min_notional", 5.0)
@@ -301,6 +319,8 @@ class RiskEngine:
         round_trip_fee_pct = (
             entry_fee_rate + self._s.BACKTEST_FEE_MAKER + self._s.BACKTEST_SLIPPAGE_PCT * 2
         )
+        # 수수료 손익분기점 체크: 플로어 적용 전 원본 TP1 기준 사용
+        # → ATR이 너무 작아 자연 TP1이 수수료를 못 커버하면 진입 거부 (플로어 스케일업은 미적용)
         tp1_move_pct = (atr * tp1_atr_mult) / entry_price
 
         # ── 모드별 수수료 안전 배수 ──────────────────────────────────────────

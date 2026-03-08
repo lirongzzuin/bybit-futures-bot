@@ -60,14 +60,14 @@ class Settings(BaseSettings):
 
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.2               # 타이트 SL → 높은 R:R 달성
-    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 2.08:1 (TP1 후 +1.0 ATR 트레일링)
-    SCALP_TP2_ATR: float = 5.5                # TP2 R:R 4.58:1 (풀 트렌드 수익)
+    SCALP_STOP_ATR: float = 1.5               # SL: 1.5× ATR (확대 — 15분봉 노이즈 대응)
+    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 1.67:1 → 플로어 적용 시 스케일업
+    SCALP_TP2_ATR: float = 5.5                # TP2 R:R 3.67:1 → 플로어 적용 시 스케일업
     SCALP_MAX_BARS: int = 48                   # 15분봉 × 48 = 12시간 최대
     SCALP_PARTIAL_EXIT_PCT: float = 0.55       # 55% TP1에서 청산, 45% 추세 유지
 
     # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
-    TREND_STOP_ATR: float = 2.0               # 일봉 추세 동행 — 여유 있는 SL
+    TREND_STOP_ATR: float = 2.5               # SL: 2.5× ATR (확대 — 추세 타이트 스탑 방지)
     TREND_TP1_ATR: float = 4.0                # TP1 R:R 2.0:1 (TP1 후 +2.5ATR 트레일링)
     TREND_TP2_ATR: float = 10.0               # TP2 R:R 5.0:1 — 풀 트렌드 수익 극대화
     TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
@@ -94,11 +94,18 @@ class Settings(BaseSettings):
     SCALP_PURE_ENTRY_MIN_SCORE: int = 6       # 진입 최소 점수 (9점 만점, HTF+LTF EMA 정렬 보장)
     SCALP_PURE_ENTRY_URGENT_SCORE: int = 9    # 긴급 진입 점수 → 시장가 선호 (최고 점수만)
     # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
-    SCALP_PURE_STOP_ATR: float = 1.0          # SL: 1.0× ATR (타이트 — 빠른 손절)
-    SCALP_PURE_TP1_ATR: float = 2.0           # TP1: 2.0× ATR (R:R 2.0:1 — 개선)
-    SCALP_PURE_TP2_ATR: float = 4.5           # TP2: 4.5× ATR (R:R 4.5:1 — 개선, 더 큰 수익 극대화)
-    SCALP_PURE_MAX_BARS: int = 30             # 최대 보유: 3분봉×30 = 90분 (TP2 도달 시간 충분히)
+    SCALP_PURE_STOP_ATR: float = 1.2          # SL: 1.2× ATR (확대 — 3분봉 노이즈 대응)
+    SCALP_PURE_TP1_ATR: float = 2.0           # TP1: 2.0× ATR → 플로어 적용 시 스케일업
+    SCALP_PURE_TP2_ATR: float = 4.5           # TP2: 4.5× ATR → 플로어 적용 시 스케일업
+    SCALP_PURE_MAX_BARS: int = 30             # 최대 보유: 3분봉×30 = 90분
     SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.50 # TP1에서 50% 청산, 50% 유지
+
+    # ── Minimum Stop Distance (노이즈 터짐 방지) ─────────────────────────
+    # ATR × 배수가 너무 작을 때 스탑이 즉시 터지는 것 방지 (가격 대비 최소 %)
+    # 3분봉 ATR은 15분봉 대비 ~3× 작으므로 TREND_RIDE 모드에서 특히 중요
+    MIN_STOP_PCT_PURE_SCALP: float = 0.004   # 최소 0.4% — 3분봉 노이즈 흡수
+    MIN_STOP_PCT_SCALP: float = 0.007        # 최소 0.7% — 15분봉 노이즈 흡수
+    MIN_STOP_PCT_TREND_RIDE: float = 0.012   # 최소 1.2% — 추세 큰 노이즈 흡수
 
     # ── Trend EMA Strategy Parameters (STRATEGY_MODE="trend") ──────────
     # Phase-locked direction: BULL_TREND=LONG만, BEAR_TREND=SHORT만, SIDEWAYS=양방향
