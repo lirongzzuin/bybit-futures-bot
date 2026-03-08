@@ -1076,8 +1076,9 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-    # Bot cycle: 스캘핑/트렌드는 LTF 타임프레임, 스윙은 SIGNAL_TIMEFRAME 기준
-    if settings.STRATEGY_MODE in ("scalp", "trend"):
+    # Bot cycle: 스캘핑/트렌드/auto는 LTF 타임프레임, 스윙은 SIGNAL_TIMEFRAME 기준
+    # auto 모드: collect_for_scalp(3m LTF) 사용 → 3분 사이클
+    if settings.STRATEGY_MODE in ("scalp", "trend", "auto"):
         cycle_interval = int(settings.SCALP_PURE_LTF_TIMEFRAME)  # 3분 기본
     else:
         cycle_interval = int(settings.SIGNAL_TIMEFRAME) if int(settings.SIGNAL_TIMEFRAME) <= 60 else 5
