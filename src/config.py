@@ -84,14 +84,14 @@ class Settings(BaseSettings):
     SCALP_PURE_EMA_SLOW: int = 50
     # RSI 진입 구간
     SCALP_PURE_RSI_PERIOD: int = 14
-    SCALP_PURE_RSI_LONG_MIN: float = 42.0     # 롱: RSI 42 이상 (모멘텀 형성, 과매도 회피)
-    SCALP_PURE_RSI_LONG_MAX: float = 62.0     # 롱: RSI 62 이하 (과매수 회피, 타이트)
-    SCALP_PURE_RSI_SHORT_MIN: float = 38.0    # 숏: RSI 38 이상 (과매도 반등 회피)
-    SCALP_PURE_RSI_SHORT_MAX: float = 58.0    # 숏: RSI 58 이하 (타이트, 과매수 회피)
+    SCALP_PURE_RSI_LONG_MIN: float = 45.0     # 롱: RSI 45 이상 (모멘텀 확인, 경계성 과매도 제거)
+    SCALP_PURE_RSI_LONG_MAX: float = 65.0     # 롱: RSI 65 이하 (과매수 회피, 상단 여유)
+    SCALP_PURE_RSI_SHORT_MIN: float = 42.0    # 숏: RSI 42 이상 (과매도 반등 회피, 상향 조정)
+    SCALP_PURE_RSI_SHORT_MAX: float = 55.0    # 숏: RSI 55 이하 (하락 모멘텀 확인 구간만)
     # 진입 조건
     SCALP_PURE_VOLUME_MULT: float = 1.3       # 볼륨 확인: 평균 대비 1.3배 이상 (품질 강화)
-    SCALP_PURE_EMA_ZONE_ATR: float = 1.0      # EMA 존 범위: EMA20 ± 1.0×ATR
-    SCALP_PURE_ENTRY_MIN_SCORE: int = 6       # 진입 최소 점수 (9점 만점, HTF+LTF EMA 정렬 보장)
+    SCALP_PURE_EMA_ZONE_ATR: float = 1.5      # EMA 존 범위: EMA21 ± 1.5×ATR (더 깊은 풀백 포착)
+    SCALP_PURE_ENTRY_MIN_SCORE: int = 7       # 진입 최소 점수 (9점 만점, 고품질 진입만 허용)
     SCALP_PURE_ENTRY_URGENT_SCORE: int = 9    # 긴급 진입 점수 → 시장가 선호 (최고 점수만)
     # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
     SCALP_PURE_STOP_ATR: float = 1.2          # SL: 1.2× ATR (확대 — 3분봉 노이즈 대응)
@@ -109,13 +109,13 @@ class Settings(BaseSettings):
 
     # ── Trend EMA Strategy Parameters (STRATEGY_MODE="trend") ──────────
     # Phase-locked direction: BULL_TREND=LONG만, BEAR_TREND=SHORT만, SIDEWAYS=양방향
-    TREND_EMA_ADX_THRESHOLD: float = 18.0      # HTF ADX ≥ 이 값이면 추세 국면 (약간 낮춤)
-    TREND_EMA_MIN_SCORE: int = 4               # 추세 진입 최소 점수 (5점 만점, 고품질 신호)
+    TREND_EMA_ADX_THRESHOLD: float = 22.0      # HTF ADX ≥ 22: 중강도 이상 추세만 허용 (노이즈 감소)
+    TREND_EMA_MIN_SCORE: int = 4               # 추세 진입 최소 점수 (5점 만점, 강한 컨펌 요구)
     TREND_EMA_RANGE_MIN_SCORE: int = 4         # 횡보 진입 최소 점수 (5점 만점, 보수적)
-    TREND_EMA_RSI_BULL_MIN: float = 38.0       # BULL_TREND 롱 RSI 하한 (약간 낮춤)
-    TREND_EMA_RSI_BULL_MAX: float = 63.0       # BULL_TREND 롱 RSI 상한 (약간 높임)
-    TREND_EMA_RSI_BEAR_MIN: float = 37.0       # BEAR_TREND 숏 RSI 하한 (과매도 반등 아님)
-    TREND_EMA_RSI_BEAR_MAX: float = 63.0       # BEAR_TREND 숏 RSI 상한 (확장)
+    TREND_EMA_RSI_BULL_MIN: float = 40.0       # BULL_TREND 롱 RSI 하한 (모멘텀 확인)
+    TREND_EMA_RSI_BULL_MAX: float = 65.0       # BULL_TREND 롱 RSI 상한 (상단 여유)
+    TREND_EMA_RSI_BEAR_MIN: float = 40.0       # BEAR_TREND 숏 RSI 하한 (과매도 반등 회피)
+    TREND_EMA_RSI_BEAR_MAX: float = 60.0       # BEAR_TREND 숏 RSI 상한 (중립 이하 확인)
     TREND_EMA_RSI_RANGE_LONG_MAX: float = 35.0 # SIDEWAYS 롱: RSI 35 이하 (강한 과매도)
     TREND_EMA_RSI_RANGE_SHORT_MIN: float = 65.0 # SIDEWAYS 숏: RSI 65 이상 (강한 과매수)
     TREND_EMA_ZONE_ATR_MULT: float = 2.0       # EMA21 ±2.0×ATR = 풀백/반등 진입 존 (확장)

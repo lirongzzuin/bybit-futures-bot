@@ -193,9 +193,15 @@ class TrendEMAStrategy:
         bull_aligned = (htf_ema21 > htf_ema50) and (htf_ema50 > htf_ema200)
         bear_aligned = (htf_ema21 < htf_ema50) and (htf_ema50 < htf_ema200)
 
-        if bull_aligned and is_trending:
+        # DI 방향성 확인: ADX가 강해도 방향이 맞아야 함
+        # BULL_TREND: +DI > -DI (매수 압력 우위)
+        # BEAR_TREND: -DI > +DI (매도 압력 우위)
+        di_bull = (htf_plus_di > htf_minus_di)
+        di_bear = (htf_minus_di > htf_plus_di)
+
+        if bull_aligned and is_trending and di_bull:
             phase = MarketPhase.BULL_TREND
-        elif bear_aligned and is_trending:
+        elif bear_aligned and is_trending and di_bear:
             phase = MarketPhase.BEAR_TREND
         else:
             phase = MarketPhase.SIDEWAYS

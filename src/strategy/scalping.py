@@ -20,21 +20,24 @@ Pure Scalping Strategy — EMA Ribbon + VWAP + RSI Momentum Scalping
 숏 진입: 롱의 정반대 조건
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-스코어링:
-  score ≥ ENTRY_MIN_SCORE (5): 진입 허용 (지정가/PostOnly 선호)
-  score ≥ ENTRY_URGENT_SCORE (7): 긴급 진입 → 시장가 선호
-  score < ENTRY_MIN_SCORE: 진입 없음 (direction=0)
+스코어링 (승률 최적화 설계):
+  score ≥ ENTRY_MIN_SCORE (7): 진입 허용 → 최소 8-10× 레버리지 보장
+  score = 8: 15-18× 레버리지 (PostOnly)
+  score = 9: 20× + 시장가 트리거 (긴급 체결)
+  score < 7: 진입 없음 — 부족한 컨플루언스 거부
 
-신호 강도 매핑 (0.60–0.95):
-  base = 0.60 + (score - min_score) × 0.07
-  score ≥ URGENT_SCORE(7): strength = max(0.91, base)  → 시장가 트리거
-  score < URGENT_SCORE:    strength = min(0.89, base)  → PostOnly 선호
-  → score=5: 0.60, score=6: 0.67, score=7~9: 0.91
+신호 강도 매핑 (_SCORE_STRENGTH_MAP 룩업 테이블):
+  score 7 → 0.77 (≥0.75 tier, 8-10×, PostOnly)
+  score 8 → 0.83 (≥0.80 tier, 15-18×, PostOnly)
+  score 9 → 0.91 (≥0.85 tier, 20× + Market 트리거)
 
-하드 필터 (진입 품질 강화):
-  HTF EMA 방향 일치: has_htf 시 HTF EMA9/EMA21 방향이 진입 방향과 일치해야 진입
-  EMA50 방향 필터:  롱은 가격 > EMA50, 숏은 가격 < EMA50 (트렌드 방향 확인)
-  캔들 품질 필터:   body > 0.15×ATR (도지/방향성 없는 캔들 제외)
+하드 필터 3단계 (진입 품질 극대화):
+  1. HTF EMA9/EMA21 방향 일치: LTF와 HTF 단기 추세 정렬 보장
+  2. LTF EMA50 방향 필터:      롱은 가격 > EMA50, 숏은 가격 < EMA50
+  3. HTF EMA50 구조 필터:      HTF 가격이 EMA50 위에서 롱, 아래에서 숏 (상위 구조 확인)
+
+캔들 스코어링 (확대):
+  +1: 양봉 바디 > 0.15×ATR (방향성 캔들) OR 강한 하단 윅 > 0.35×ATR (핀바 패턴)
 
 수수료 최적화:
   score < URGENT_SCORE AND spread < 0.2%: PostOnly 지정가 (Maker 0.020%)
@@ -138,9 +141,9 @@ class ScalpingStrategy:
 
         # ── LTF 지표 계산 ────────────────────────────────────────────────────
         close_ltf = ltf_df["close"]
-        high_ltf = ltf_df["high"]
-        low_ltf = ltf_df["low"]
-        vol_ltf = ltf_df["volume"]
+        high_ltf  = ltf_df["high"]
+        low_ltf   = ltf_df["low"]
+        vol_ltf   = ltf_df["volume"]
 
         ema9_ltf_s = ema(close_ltf, self._s.SCALP_PURE_EMA_FAST)
         ema21_ltf_s = ema(close_ltf, self._s.SCALP_PURE_EMA_MID)
@@ -151,8 +154,10 @@ class ScalpingStrategy:
 
         # 현재 봉 값
         current_price = float(close_ltf.iloc[-1])
-        current_open = float(ltf_df["open"].iloc[-1])
-        current_vol = float(vol_ltf.iloc[-1])
+        current_open  = float(ltf_df["open"].iloc[-1])
+        current_high  = float(high_ltf.iloc[-1])
+        current_low   = float(low_ltf.iloc[-1])
+        current_vol   = float(vol_ltf.iloc[-1])
         ltf_ema9 = float(ema9_ltf_s.iloc[-1])
         ltf_ema21 = float(ema21_ltf_s.iloc[-1])
         ltf_ema50 = float(ema50_ltf_s.iloc[-1])
@@ -172,22 +177,25 @@ class ScalpingStrategy:
                 return self._neutral(), ltf_atr
 
         # ── HTF 지표 계산 ────────────────────────────────────────────────────
-        htf_ema9 = 0.0
+        htf_ema9  = 0.0
         htf_ema21 = 0.0
-        htf_vwap = vwap_val   # collector에서 사전 계산된 VWAP
+        htf_ema50 = 0.0   # NEW: EMA50 구조 필터용
+        htf_vwap  = vwap_val   # collector에서 사전 계산된 VWAP
         htf_price = 0.0
         has_htf = htf_df is not None and len(htf_df) >= 30
 
         if has_htf:
             close_htf = htf_df["close"]
-            high_htf = htf_df["high"]
-            low_htf = htf_df["low"]
-            vol_htf = htf_df["volume"]
+            high_htf  = htf_df["high"]
+            low_htf   = htf_df["low"]
+            vol_htf   = htf_df["volume"]
 
-            ema9_htf_s = ema(close_htf, self._s.SCALP_PURE_EMA_FAST)
+            ema9_htf_s  = ema(close_htf, self._s.SCALP_PURE_EMA_FAST)
             ema21_htf_s = ema(close_htf, self._s.SCALP_PURE_EMA_MID)
-            htf_ema9 = float(ema9_htf_s.iloc[-1])
+            ema50_htf_s = ema(close_htf, self._s.SCALP_PURE_EMA_SLOW)
+            htf_ema9  = float(ema9_htf_s.iloc[-1])
             htf_ema21 = float(ema21_htf_s.iloc[-1])
+            htf_ema50 = float(ema50_htf_s.iloc[-1])
             htf_price = float(close_htf.iloc[-1])
 
             # VWAP이 사전 계산 안 된 경우 HTF 데이터로 직접 계산
@@ -214,6 +222,7 @@ class ScalpingStrategy:
             has_htf=has_htf,
             funding_rate=funding_rate,
             spread_pct=spread_pct,
+            current_low=current_low,   # 하단 윅 리젝션 계산용
         )
 
         short_score, short_details = self._score_short(
@@ -232,6 +241,7 @@ class ScalpingStrategy:
             has_htf=has_htf,
             funding_rate=funding_rate,
             spread_pct=spread_pct,
+            current_high=current_high,  # 상단 윅 리젝션 계산용
         )
 
         min_score = self._s.SCALP_PURE_ENTRY_MIN_SCORE
@@ -275,20 +285,37 @@ class ScalpingStrategy:
                 )
                 return self._neutral(), ltf_atr
 
-        # ── 하드 필터 2: EMA50 방향 필터 (느린 추세 방향 확인) ─────────────────
-        # EMA50 위에서 롱, EMA50 아래에서 숏 → 상위 모멘텀 확인
+        # ── 하드 필터 2: LTF EMA50 방향 필터 (느린 추세 방향 확인) ─────────────
+        # LTF EMA50 위에서 롱, EMA50 아래에서 숏 → 상위 모멘텀 확인
         # 0.2% 버퍼: 극단적 이탈만 거부 (EMA50 근접 구간은 허용)
         if ltf_ema50 > 0 and not np.isnan(ltf_ema50):
             if direction == 1 and current_price < ltf_ema50 * 0.998:
                 log.debug(
-                    "ScalpStrategy: Price %.2f below EMA50 %.2f → long rejected",
+                    "ScalpStrategy: Price %.2f below LTF EMA50 %.2f → long rejected",
                     current_price, ltf_ema50,
                 )
                 return self._neutral(), ltf_atr
             if direction == -1 and current_price > ltf_ema50 * 1.002:
                 log.debug(
-                    "ScalpStrategy: Price %.2f above EMA50 %.2f → short rejected",
+                    "ScalpStrategy: Price %.2f above LTF EMA50 %.2f → short rejected",
                     current_price, ltf_ema50,
+                )
+                return self._neutral(), ltf_atr
+
+        # ── 하드 필터 3: HTF EMA50 구조 필터 (상위 타임프레임 추세 구조 확인) ──
+        # HTF 가격이 EMA50 위에서만 롱, 아래에서만 숏 → 상위 구조 방향과 정렬
+        # 0.3% 버퍼: 풀백 구간 허용 (너무 엄격하면 진입 기회 손실)
+        if has_htf and htf_ema50 > 0 and not np.isnan(htf_ema50):
+            if direction == 1 and htf_price < htf_ema50 * 0.997:
+                log.debug(
+                    "ScalpStrategy: HTF price %.2f below HTF EMA50 %.2f → long rejected",
+                    htf_price, htf_ema50,
+                )
+                return self._neutral(), ltf_atr
+            if direction == -1 and htf_price > htf_ema50 * 1.003:
+                log.debug(
+                    "ScalpStrategy: HTF price %.2f above HTF EMA50 %.2f → short rejected",
+                    htf_price, htf_ema50,
                 )
                 return self._neutral(), ltf_atr
 
@@ -429,6 +456,7 @@ class ScalpingStrategy:
         has_htf: bool,
         funding_rate: float,
         spread_pct: float,
+        current_low: float = 0.0,   # 하단 윅 리젝션 계산용 (핀바 패턴)
     ) -> Tuple[int, Dict[str, int]]:
         """롱 진입 스코어 계산 (9점 만점)."""
         d: Dict[str, int] = {}
@@ -465,10 +493,17 @@ class ScalpingStrategy:
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
         # ── 캔들 방향/품질 (최대 +1) ───────────────────────────────────────
-        # +1: 양봉이면서 캔들 바디 > 0.15×ATR (도지/스피닝탑 제외 — 방향성 확인)
-        candle_body = abs(current_price - current_open)
-        min_body = ltf_atr * 0.15
-        d["bull_candle"] = 1 if (current_price > current_open and candle_body >= min_body) else 0
+        # +1: 양봉 바디 > 0.15×ATR (방향성 확인)
+        # OR: 강한 하단 윅 리젝션 > 0.35×ATR AND 윅이 바디의 2배 이상 (핀바 패턴)
+        #   → EMA 지지에서 하단 윅 핀바 = 고확률 반등 신호
+        candle_body = current_price - current_open  # positive = bullish
+        bull_body = (candle_body >= ltf_atr * 0.15)
+        if current_low > 0:
+            lower_wick = min(current_price, current_open) - current_low
+            wick_rejection = (lower_wick >= ltf_atr * 0.35 and lower_wick >= 2 * abs(candle_body))
+        else:
+            wick_rejection = False
+        d["bull_candle"] = 1 if (bull_body or wick_rejection) else 0
 
         # ── 패널티 ────────────────────────────────────────────────────────
         # -1: 펀딩 비율 과다 (한쪽 포지션 쏠림 위험)
@@ -498,6 +533,7 @@ class ScalpingStrategy:
         has_htf: bool,
         funding_rate: float,
         spread_pct: float,
+        current_high: float = 0.0,  # 상단 윅 리젝션 계산용 (핀바 패턴)
     ) -> Tuple[int, Dict[str, int]]:
         """숏 진입 스코어 계산 (9점 만점, 롱의 정반대 조건)."""
         d: Dict[str, int] = {}
@@ -526,11 +562,18 @@ class ScalpingStrategy:
         vol_mult = self._s.SCALP_PURE_VOLUME_MULT
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
-        # ── 캔들 방향/품질 (음봉) ──────────────────────────────────────────
-        # +1: 음봉이면서 캔들 바디 > 0.15×ATR (방향성 있는 음봉만 인정)
-        candle_body_s = abs(current_price - current_open)
-        min_body_s = ltf_atr * 0.15
-        d["bear_candle"] = 1 if (current_price < current_open and candle_body_s >= min_body_s) else 0
+        # ── 캔들 방향/품질 (음봉 또는 상단 윅 리젝션) ────────────────────────
+        # +1: 음봉 바디 > 0.15×ATR (방향성 있는 음봉)
+        # OR: 강한 상단 윅 리젝션 > 0.35×ATR AND 윅이 바디의 2배 이상 (역핀바 패턴)
+        #   → EMA 저항에서 상단 윅 = 고확률 하락 신호
+        candle_body_s = current_open - current_price  # positive = bearish
+        bear_body = (candle_body_s >= ltf_atr * 0.15)
+        if current_high > 0:
+            upper_wick = current_high - max(current_price, current_open)
+            wick_rejection_s = (upper_wick >= ltf_atr * 0.35 and upper_wick >= 2 * abs(candle_body_s))
+        else:
+            wick_rejection_s = False
+        d["bear_candle"] = 1 if (bear_body or wick_rejection_s) else 0
 
         # ── 패널티 ────────────────────────────────────────────────────────
         d["adverse_funding"] = -1 if abs(funding_rate) > 0.001 else 0
