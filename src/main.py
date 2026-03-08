@@ -475,7 +475,9 @@ class TradingBot:
             trend_score=combined.long_score - combined.short_score,
         )
 
-        trade_mode_str = "PURE_SCALP"
+        # TRENDING 국면은 SCALP(TP1=2.5×ATR, stop=1.2×ATR, max=48봉)으로 추세 타기
+        # RANGING 국면은 PURE_SCALP(TP1=1.5×ATR, stop=1.0×ATR)으로 타이트 mean reversion
+        trade_mode_str = "SCALP" if combined.regime != Regime.RANGING else "PURE_SCALP"
         return snap, combined, atr_val, regime_r, trade_mode_str
 
     # ── Order Execution ───────────────────────────────────────────────────────
