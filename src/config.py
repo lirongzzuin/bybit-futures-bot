@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # ── Strategy Selection ────────────────────────────────────
     # "swing": 현재 15분봉 기반 스윙/추세추종 전략 (기본값)
     # "scalp": 3분봉 기반 EMA Ribbon+VWAP+RSI 순수 스캘핑 전략
-    STRATEGY_MODE: Literal["swing", "scalp"] = "swing"
+    STRATEGY_MODE: Literal["swing", "scalp", "trend"] = "swing"
 
     # ── Bybit API ─────────────────────────────────────────────
     BYBIT_API_KEY: str = ""
@@ -87,6 +87,20 @@ class Settings(BaseSettings):
     SCALP_PURE_TP2_ATR: float = 4.5           # TP2: 4.5× ATR (R:R 4.5:1 — 개선, 더 큰 수익 극대화)
     SCALP_PURE_MAX_BARS: int = 30             # 최대 보유: 3분봉×30 = 90분 (TP2 도달 시간 충분히)
     SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.50 # TP1에서 50% 청산, 50% 유지
+
+    # ── Trend EMA Strategy Parameters (STRATEGY_MODE="trend") ──────────
+    # Phase-locked direction: BULL_TREND=LONG만, BEAR_TREND=SHORT만, SIDEWAYS=양방향
+    TREND_EMA_ADX_THRESHOLD: float = 18.0      # HTF ADX ≥ 이 값이면 추세 국면 (약간 낮춤)
+    TREND_EMA_MIN_SCORE: int = 4               # 추세 진입 최소 점수 (5점 만점, 고품질 신호)
+    TREND_EMA_RANGE_MIN_SCORE: int = 4         # 횡보 진입 최소 점수 (5점 만점, 보수적)
+    TREND_EMA_RSI_BULL_MIN: float = 38.0       # BULL_TREND 롱 RSI 하한 (약간 낮춤)
+    TREND_EMA_RSI_BULL_MAX: float = 63.0       # BULL_TREND 롱 RSI 상한 (약간 높임)
+    TREND_EMA_RSI_BEAR_MIN: float = 37.0       # BEAR_TREND 숏 RSI 하한 (과매도 반등 아님)
+    TREND_EMA_RSI_BEAR_MAX: float = 63.0       # BEAR_TREND 숏 RSI 상한 (확장)
+    TREND_EMA_RSI_RANGE_LONG_MAX: float = 35.0 # SIDEWAYS 롱: RSI 35 이하 (강한 과매도)
+    TREND_EMA_RSI_RANGE_SHORT_MIN: float = 65.0 # SIDEWAYS 숏: RSI 65 이상 (강한 과매수)
+    TREND_EMA_ZONE_ATR_MULT: float = 2.0       # EMA21 ±2.0×ATR = 풀백/반등 진입 존 (확장)
+    TREND_EMA_VOLUME_MULT: float = 1.1         # 거래량 ≥ 20봉 평균 × 1.1 (약간 완화)
 
     # ── Signal Quality Filters (15분봉 기준 최적화) ─────────────────
     SIGNAL_FILTER_ER_THRESHOLD: float = 0.06   # 추세성 확인 (완화로 기회 확대)

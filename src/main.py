@@ -44,6 +44,7 @@ from src.strategy.macro_regime import MacroRegimeDetector, MacroRegime
 from src.strategy.regime import RegimeDetector, Regime
 from src.strategy.scalp import TradeModeDetector
 from src.strategy.scalping import ScalpingStrategy
+from src.strategy.trend_ema import TrendEMAStrategy
 from src.strategy.signals import SignalGenerator
 
 log = get_logger(__name__)
@@ -67,6 +68,7 @@ class TradingBot:
         self._combiner = SignalCombiner(settings)
         self._mode_detector = TradeModeDetector(settings)
         self._scalp_strategy = ScalpingStrategy(settings)
+        self._trend_strategy = TrendEMAStrategy(settings)
         self._risk_engine = RiskEngine(settings)
         self._guards = RiskGuards(settings)
         self._state_machine = StateMachine(settings)
@@ -181,6 +183,8 @@ class TradingBot:
         # ── 전략별 데이터 수집 및 신호 생성 ──────────────────────────────────
         if settings.STRATEGY_MODE == "scalp":
             result = self._collect_and_signal_scalp(symbol)
+        elif settings.STRATEGY_MODE == "trend":
+            result = self._collect_and_signal_trend(symbol)
         else:
             result = self._collect_and_signal_swing(symbol)
 
@@ -428,6 +432,50 @@ class TradingBot:
         # 스캘핑 전략은 항상 PURE_SCALP 모드 사용 (타이트한 ATR 파라미터)
         trade_mode_str = "PURE_SCALP"
 
+        return snap, combined, atr_val, regime_r, trade_mode_str
+
+    def _collect_and_signal_trend(self, symbol: str):
+        """
+        Trend EMA 전략: Phase-locked Direction System.
+        3분봉(LTF) + 15분봉(HTF) 데이터로 장세 판단 후 방향 고정 진입.
+
+        - BULL_TREND: LONG만 허용 (EMA21>50>200 + ADX 강세)
+        - BEAR_TREND: SHORT만 허용 (EMA21<50<200 + ADX 강세)
+        - SIDEWAYS: 볼린저밴드 극단 양방향 (더 높은 점수 요구)
+
+        Returns (snap, combined, atr_val, regime_r, trade_mode_str) or None
+        """
+        from src.strategy.regime import RegimeResult
+
+        snap = self._collector.collect_for_scalp(symbol, limit=500)
+        if snap.ohlcv.empty or len(snap.ohlcv) < 50:
+            log.warning("Trend: Insufficient LTF data for %s (%d bars)", symbol, len(snap.ohlcv))
+            return None
+
+        combined, atr_val = self._trend_strategy.generate(
+            ltf_df=snap.ohlcv,
+            htf_df=snap.trend_ohlcv,
+            vwap_val=snap.vwap,
+            funding_rate=snap.funding_rate,
+            spread_pct=snap.orderbook.spread_pct,
+            oi_change_pct=snap.oi_change_pct,
+        )
+
+        from src.strategy.regime import Regime
+        regime_r = RegimeResult(
+            regime=combined.regime,
+            confidence=combined.strength,
+            adx_val=0.0,
+            plus_di=0.0,
+            minus_di=0.0,
+            ema_aligned_up=(combined.direction == 1),
+            ema_aligned_down=(combined.direction == -1),
+            vol_percentile=0.5,
+            volume_ratio=1.0,
+            trend_score=combined.long_score - combined.short_score,
+        )
+
+        trade_mode_str = "PURE_SCALP"
         return snap, combined, atr_val, regime_r, trade_mode_str
 
     # ── Order Execution ───────────────────────────────────────────────────────
@@ -887,8 +935,8 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-    # Bot cycle: 스캘핑 모드는 LTF 타임프레임, 스윙 모드는 SIGNAL_TIMEFRAME 기준
-    if settings.STRATEGY_MODE == "scalp":
+    # Bot cycle: 스캘핑/트렌드는 LTF 타임프레임, 스윙은 SIGNAL_TIMEFRAME 기준
+    if settings.STRATEGY_MODE in ("scalp", "trend"):
         cycle_interval = int(settings.SCALP_PURE_LTF_TIMEFRAME)  # 3분 기본
     else:
         cycle_interval = int(settings.SIGNAL_TIMEFRAME) if int(settings.SIGNAL_TIMEFRAME) <= 60 else 5
