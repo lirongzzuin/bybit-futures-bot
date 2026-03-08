@@ -53,6 +53,19 @@ class DailyBriefing:
         self._sm = state_machine
         self._last_equity: float = 0.0
 
+        # 레짐 컨텍스트 (TradingBot이 매 사이클 업데이트)
+        self._macro_mode: str = "BEAR_SIDEWAYS"
+        self._symbol_regimes: Dict[str, str] = {}   # {symbol: DynamicRegime.value}
+
+    def update_regime_context(
+        self,
+        macro_mode: str,
+        symbol_regimes: Dict[str, str],
+    ) -> None:
+        """TradingBot._cycle() 종료 시 호출 — 최신 레짐 상태 캐시."""
+        self._macro_mode = macro_mode
+        self._symbol_regimes = dict(symbol_regimes)
+
     def reset_pnl_baseline(self) -> float:
         """
         누적 PnL + 기간 PnL 기준점을 현재 equity로 초기화.
@@ -160,6 +173,10 @@ class DailyBriefing:
             "leverage_avg": avg_lev,
             "exposure_pct": exposure_pct,
             "mode": self._s.TRADING_MODE,
+            # 레짐 & 전략 정보
+            "strategy_mode": self._s.STRATEGY_MODE,
+            "macro_regime": self._macro_mode,
+            "symbol_regimes": dict(self._symbol_regimes),
         }
 
     def _get_equity(self) -> float:

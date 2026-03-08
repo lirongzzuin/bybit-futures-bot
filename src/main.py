@@ -179,6 +179,18 @@ class TradingBot:
         # ── 6. Record equity ──────────────────────────────────────────────────
         self._db.record_equity(equity, settings.TRADING_MODE)
 
+        # ── 7. 브리핑용 레짐 컨텍스트 업데이트 ──────────────────────────────
+        # auto 모드: RegimeRouter 캐시에서 심볼별 확정 레짐 수집
+        # 그 외 모드: STRATEGY_MODE 자체가 전략명 역할
+        if settings.STRATEGY_MODE == "auto":
+            sym_regimes = {
+                s: self._regime_router.get_confirmed_regime(s).value
+                for s in symbols
+            }
+        else:
+            sym_regimes = {s: settings.STRATEGY_MODE.upper() for s in symbols}
+        self._briefing.update_regime_context(self._macro_mode, sym_regimes)
+
     def _process_symbol(
         self,
         symbol: str,

@@ -290,13 +290,14 @@ class SlackNotifier:
         """
         report keys: session, date, time, equity, period_pnl, period_pct,
                      total_pnl, total_pct, drawdown, positions, trades_today,
-                     win_rate, leverage_avg, exposure_pct, mode
+                     win_rate, leverage_avg, exposure_pct, mode,
+                     strategy_mode, macro_regime, symbol_regimes
         """
         session = report.get("session", "브리핑")
         date = report.get("date", _now()[:10])
         time_str = report.get("time", _now()[11:])
         eq = report.get("equity", 0)
-        p_pnl = report.get("period_pnl", 0)     # 마지막 브리핑 이후 PnL
+        p_pnl = report.get("period_pnl", 0)
         p_pct = report.get("period_pct", 0)
         t_pnl = report.get("total_pnl", 0)
         t_pct = report.get("total_pct", 0)
@@ -307,7 +308,50 @@ class SlackNotifier:
         lev = report.get("leverage_avg", 0)
         exp = report.get("exposure_pct", 0)
         mode = report.get("mode", "?")
+        strategy_mode = report.get("strategy_mode", "?")
+        macro_regime = report.get("macro_regime", "?")
+        symbol_regimes: Dict[str, str] = report.get("symbol_regimes", {})
 
+        # ── 장세 & 전략 섹션 ──────────────────────────────────────────────────
+        _REGIME_EMOJI = {
+            "STRONG_BULL": "🚀", "BULL": "📈",
+            "SIDEWAYS":    "↔️", "VOLATILE": "⚡",
+            "BEAR":        "📉", "STRONG_BEAR": "🔻",
+            "TRANSITION":  "⏳",
+        }
+        _MACRO_EMOJI = {"BULL": "🌕", "BEAR_SIDEWAYS": "🌑"}
+        _STRATEGY_EMOJI = {
+            "auto": "🤖", "trend": "🧭", "scalp": "⚡", "swing": "🌊",
+        }
+        _REGIME_DESC = {
+            "STRONG_BULL": "강한 상승추세 (LONG only)",
+            "BULL":        "상승추세 (LONG only)",
+            "SIDEWAYS":    "횡보장 (양방향 mean reversion)",
+            "VOLATILE":    "고변동성 (포지션 50% 축소)",
+            "BEAR":        "하락추세 (SHORT only)",
+            "STRONG_BEAR": "강한 하락추세 (SHORT only)",
+            "TRANSITION":  "장세 전환 중 (진입 대기)",
+        }
+        _STRATEGY_DESC = {
+            "auto":  "Dynamic Regime Router (자동)",
+            "trend": "TrendEMA Phase-locked",
+            "scalp": "EMA Ribbon Scalping",
+            "swing": "ICT + Multi-signal Swing",
+        }
+
+        macro_emoji = _MACRO_EMOJI.get(macro_regime, "❓")
+        strat_emoji = _STRATEGY_EMOJI.get(strategy_mode, "❓")
+        strat_desc = _STRATEGY_DESC.get(strategy_mode, strategy_mode)
+
+        regime_lines = ""
+        for sym, reg in symbol_regimes.items():
+            r_emoji = _REGIME_EMOJI.get(reg, "❓")
+            r_desc = _REGIME_DESC.get(reg, reg)
+            regime_lines += f"  {r_emoji} `{sym}` : *{reg}* — {r_desc}\n"
+        if not regime_lines:
+            regime_lines = "  _(장세 데이터 없음)_\n"
+
+        # ── 포지션 섹션 ────────────────────────────────────────────────────────
         pos_lines = ""
         for p in positions:
             side = p.get("side", "?")
@@ -335,7 +379,12 @@ class SlackNotifier:
             f"{sep}\n"
             f"{dd_emoji} MDD: {dd:.2%} | 📦 {exp:.1%} 노출 | ×{lev:.1f} 평균레버\n"
             f"🎯 오늘 거래: {trades}회 | 최근 승률: {wr:.1%}\n"
-            f"\n*Open Positions ({len(positions)}):*\n{pos_lines}"
+            f"{sep}\n"
+            f"🧠 *운용 전략* : {strat_emoji} `{strategy_mode.upper()}` — {strat_desc}\n"
+            f"{macro_emoji} *매크로 레짐* : `{macro_regime}`\n"
+            f"\n*📡 심볼별 장세 판단:*\n{regime_lines}"
+            f"{sep}\n"
+            f"*Open Positions ({len(positions)}):*\n{pos_lines}"
         )
         self._send(text)
 
