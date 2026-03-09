@@ -78,10 +78,10 @@ class RouterResult:
 _ROUTING_TABLE: Dict[DynamicRegime, Tuple[str, str, int, float, int]] = {
     DynamicRegime.STRONG_BULL: ("trend", "TREND_RIDE", +1, 1.00, 20),
     DynamicRegime.BULL:        ("trend", "SCALP",       +1, 0.90, 15),
-    DynamicRegime.SIDEWAYS:    ("skip",  "",              0, 0.00,  0),
+    DynamicRegime.SIDEWAYS:    ("scalp", "PURE_SCALP",    0, 0.80, 10),
     DynamicRegime.BEAR:        ("trend", "SCALP",       -1, 0.90, 15),
     DynamicRegime.STRONG_BEAR: ("trend", "TREND_RIDE",  -1, 1.00, 20),
-    DynamicRegime.VOLATILE:    ("skip",  "",              0, 0.00,  0),
+    DynamicRegime.VOLATILE:    ("scalp", "PURE_SCALP",   0, 0.50,  8),
     DynamicRegime.TRANSITION:  ("skip",  "",              0, 0.00,  0),
 }
 

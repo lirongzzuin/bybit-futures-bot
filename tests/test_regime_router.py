@@ -130,18 +130,22 @@ class TestBasicClassification:
         assert s[4] == 15
 
     def test_sideways_routing(self):
-        """SIDEWAYS → strategy=skip (방향성 없는 장세 진입 금지)."""
+        """SIDEWAYS → strategy=scalp, PURE_SCALP, 양방향, 80% risk, 10× cap."""
         s = _ROUTING_TABLE[DynamicRegime.SIDEWAYS]
-        assert s[0] == "skip"
+        assert s[0] == "scalp"
+        assert s[1] == "PURE_SCALP"
         assert s[2] == 0
-        assert s[3] == 0.00
+        assert s[3] == 0.80
+        assert s[4] == 10
 
     def test_volatile_routing(self):
-        """VOLATILE → strategy=skip (고변동성 장세 진입 금지)."""
+        """VOLATILE → strategy=scalp, PURE_SCALP, 양방향, 50% risk, 8× cap."""
         s = _ROUTING_TABLE[DynamicRegime.VOLATILE]
-        assert s[0] == "skip"
+        assert s[0] == "scalp"
+        assert s[1] == "PURE_SCALP"
         assert s[2] == 0
-        assert s[3] == 0.00
+        assert s[3] == 0.50
+        assert s[4] == 8
 
     def test_transition_routing(self):
         """TRANSITION → strategy=skip, risk=0."""
@@ -367,14 +371,14 @@ class TestEdgeCases:
         # 미등록 심볼 → 기본값 SIDEWAYS
         assert router.get_confirmed_regime("NEWUSDT") == DynamicRegime.SIDEWAYS
 
-    def test_volatile_risk_multiplier_is_zero(self):
-        """VOLATILE 레짐 → strategy=skip, risk_multiplier=0.0."""
+    def test_volatile_risk_multiplier_is_half(self):
+        """VOLATILE 레짐 → strategy=scalp, risk_multiplier=0.50 (50% 축소)."""
         router = RegimeRouter(make_settings(REGIME_ROUTER_CONFIRM_BARS=1))
         df = make_ohlcv(500)
         router._state["BTC"] = _SymbolState(confirmed_regime=DynamicRegime.VOLATILE)
         r = _force_regime(router, "BTC", DynamicRegime.VOLATILE, df)
-        assert r.risk_multiplier == 0.00
-        assert r.strategy == "skip"
+        assert r.risk_multiplier == 0.50
+        assert r.strategy == "scalp"
 
     def test_classify_pure_function_returns_tuple(self):
         """_classify가 (DynamicRegime, float, str) 튜플을 반환한다."""
