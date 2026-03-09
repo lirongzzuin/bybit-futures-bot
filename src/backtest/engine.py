@@ -26,13 +26,17 @@ from src.backtest.data_loader import load_multi
 from src.backtest.report import generate_report, QualityGate
 from src.config import Settings
 from src.logger import get_logger
+from src.risk.engine import RiskEngine
 from src.strategy.combiner import SignalCombiner
 from src.strategy.filters import QualityFilter
 from src.strategy.ict import ICTAnalyzer
 from src.strategy.indicators import atr, volatility_percentile
 from src.strategy.regime import RegimeDetector
+from src.strategy.regime_router import RegimeRouter
 from src.strategy.scalp import TradeModeDetector
+from src.strategy.scalping import ScalpingStrategy
 from src.strategy.signals import SignalGenerator
+from src.strategy.trend_ema import TrendEMAStrategy
 
 log = get_logger(__name__)
 
@@ -85,6 +89,10 @@ class BacktestEngine:
         self._combiner = SignalCombiner(cfg)
         self._mode_detector = TradeModeDetector(cfg)
         self._quality_filter = QualityFilter(cfg)
+        self._scalp_strategy = ScalpingStrategy(cfg)
+        self._trend_strategy = TrendEMAStrategy(cfg)
+        self._regime_router = RegimeRouter(cfg)
+        self._risk_engine = RiskEngine(cfg)
         # 15분봉 기준: 8시간 = 32봉 (펀딩 주기)
         tf_min = int(self._s.SIGNAL_TIMEFRAME) if self._s.SIGNAL_TIMEFRAME.isdigit() else 15
         self._funding_bars = max(1, 480 // tf_min)   # 8h in tf_min bars
@@ -244,10 +252,16 @@ class BacktestEngine:
         portfolio: PortfolioState,
         symbol: str,
     ) -> Optional[dict]:
-        window = df.iloc[max(0, bar_idx - 199): bar_idx + 1]
+        window = df.iloc[max(0, bar_idx - 499): bar_idx + 1]
 
-        # ── Quality filter (ER + ATR; Hurst skipped for backtest performance) ──
-        # Cache result for 12 bars to avoid re-computation on each candidate bar
+        strategy_mode = self._s.STRATEGY_MODE
+
+        # ── Auto/Scalp/Trend 전략 사용 시 직접 신호 생성 ─────────────────
+        if strategy_mode in ("auto", "scalp", "trend"):
+            return self._evaluate_entry_modern(df, bar_idx, window, portfolio, symbol)
+
+        # ── Swing 전략 (기존 로직) ───────────────────────────────────────
+        # Quality filter
         try:
             cached = self._filter_cache.get(symbol)
             if cached is None or (bar_idx - cached[0]) >= self._filter_every:
@@ -258,20 +272,15 @@ class BacktestEngine:
             if not flt.passed:
                 return None
         except Exception:
-            pass  # filter errors are non-fatal
+            pass
 
         try:
-            # hurst_max_lags=0 = fast mode (skip O(n²) Hurst in backtest)
             regime_r = self._regime.detect(window, hurst_max_lags=0)
             ict_r = self._ict.analyze(window)
 
-            # HTF (4H) 데이터: 현재 15M 봉에 해당하는 4H 봉까지 사용
             htf_window = None
             htf_df_full = self._htf_data.get(symbol)
             if htf_df_full is not None and len(htf_df_full) > 0:
-                # 룩어헤드 바이어스 방지: 현재 진행 중인 4H 봉은 사용 불가
-                # bar_idx // ratio = 현재 4H 그룹 (미완성 가능)
-                # -1 해서 직전 완성된 4H 봉까지만 사용
                 htf_bar_idx = (bar_idx // self._htf_ratio) - 1
                 min_htf_needed = self._s.HTF_EMA_TREND + 15
                 if htf_bar_idx >= min_htf_needed:
@@ -297,7 +306,6 @@ class BacktestEngine:
         if atr_val <= 0:
             return None
 
-        # Detect trade mode
         mode_result = self._mode_detector.detect(
             regime=regime_r,
             ict_result=ict_r,
@@ -313,23 +321,17 @@ class BacktestEngine:
         if stop_dist_pct <= 0:
             return None
 
-        # Position sizing — correct leverage for risk-based exposure.
-        # We want: leverage × MAX_SINGLE_EXPOSURE_PCT × stop_dist_pct = target_risk
-        # → leverage = target_risk / (MAX_SINGLE_EXPOSURE_PCT × stop_dist_pct)
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
         lev_float = target_risk / (self._s.MAX_SINGLE_EXPOSURE_PCT * stop_dist_pct)
         leverage = max(1, min(int(lev_float), self._s.MAX_LEVERAGE_CAP))
 
-        # Notional and qty from margin allocation
         margin = portfolio.equity * self._s.MAX_SINGLE_EXPOSURE_PCT
         notional = margin * leverage
         qty = notional / close
 
-        # Minimum notional sanity check
         if notional < 10.0:
             return None
 
-        # Apply slippage
         slip = close * self._s.BACKTEST_SLIPPAGE_PCT
         if combined.direction == 1:
             entry_price = close + slip
@@ -342,7 +344,6 @@ class BacktestEngine:
             tp1_price = entry_price - atr_val * mode_params.tp1_atr
             tp_price = entry_price - atr_val * mode_params.tp2_atr
 
-        # Entry fee — PostOnly limit orders use maker fee rate
         fee = notional * self._s.BACKTEST_FEE_MAKER
 
         return {
@@ -368,6 +369,147 @@ class BacktestEngine:
             "atr": atr_val,
             "trade_mode": mode_result.mode.value,
             "max_bars": mode_params.max_bars,
+        }
+
+    # ── Modern Entry (auto/scalp/trend) ────────────────────────────────────────
+
+    def _evaluate_entry_modern(
+        self,
+        df: pd.DataFrame,
+        bar_idx: int,
+        window: pd.DataFrame,
+        portfolio: PortfolioState,
+        symbol: str,
+    ) -> Optional[dict]:
+        """Auto/Scalp/Trend 전략 백테스트 진입 평가."""
+        strategy_mode = self._s.STRATEGY_MODE
+
+        # HTF 윈도우 (15m resample for scalp/trend, 직접 사용 for auto)
+        htf_window = None
+        htf_df_full = self._htf_data.get(symbol)
+        if htf_df_full is not None and len(htf_df_full) > 0:
+            htf_bar_idx = (bar_idx // self._htf_ratio) - 1
+            if htf_bar_idx >= 210:
+                htf_start = max(0, htf_bar_idx - 300)
+                htf_window = htf_df_full.iloc[htf_start: htf_bar_idx + 1]
+                if len(htf_window) < 55:
+                    htf_window = None
+
+        try:
+            trade_mode_str = "PURE_SCALP"
+
+            if strategy_mode == "auto":
+                # Regime Router → 전략 선택 (15m 데이터 직접 전달 — 내부에서 60m 리샘플)
+                router_result = self._regime_router.detect(
+                    symbol=symbol,
+                    mtf_df=window,
+                    macro_bear=False,
+                )
+                if router_result.strategy == "skip":
+                    return None
+
+                # 전략 라우팅
+                if router_result.strategy == "trend":
+                    combined, atr_val = self._trend_strategy.generate(
+                        ltf_df=window, htf_df=htf_window,
+                    )
+                else:
+                    combined, atr_val = self._scalp_strategy.generate(
+                        ltf_df=window, htf_df=htf_window,
+                    )
+
+                # direction bias 필터
+                if router_result.direction_bias != 0 and combined.direction != 0:
+                    if combined.direction != router_result.direction_bias:
+                        return None
+
+                trade_mode_str = router_result.trade_mode or "PURE_SCALP"
+
+            elif strategy_mode == "trend":
+                combined, atr_val = self._trend_strategy.generate(
+                    ltf_df=window, htf_df=htf_window,
+                )
+                from src.strategy.regime import Regime
+                trade_mode_str = "SCALP" if combined.regime != Regime.RANGING else "PURE_SCALP"
+
+            else:  # scalp
+                combined, atr_val = self._scalp_strategy.generate(
+                    ltf_df=window, htf_df=htf_window,
+                )
+                trade_mode_str = "PURE_SCALP"
+
+        except Exception as e:
+            log.debug("Modern signal error at bar %d: %s", bar_idx, e)
+            return None
+
+        if combined.direction == 0:
+            return None
+        if combined.strength < self._s.SIGNAL_ENTRY_THRESHOLD:
+            return None
+        if atr_val <= 0:
+            return None
+
+        close = float(df["close"].iloc[bar_idx])
+
+        # RiskEngine으로 포지션 사이징 (실제 봇과 동일한 로직)
+        vol_pct_s = volatility_percentile(window["close"])
+        vol_pct = float(vol_pct_s.iloc[-1]) if not vol_pct_s.empty else 0.5
+
+        risk_params = self._risk_engine.calculate(
+            equity=portfolio.equity,
+            entry_price=close,
+            side="Buy" if combined.direction == 1 else "Sell",
+            atr=atr_val,
+            signal_strength=combined.strength,
+            spread_pct=0.001,
+            funding_rate=0.0,
+            vol_percentile=vol_pct,
+            drawdown_pct=portfolio.drawdown,
+            consecutive_losses=portfolio.consecutive_losses.get(symbol, 0),
+            symbol_max_leverage=100,
+            symbol_info={"min_notional": 5.0},
+            current_positions=len(portfolio.open_positions),
+            trade_mode=trade_mode_str,
+            bear_mode=False,
+        )
+
+        if not risk_params.risk_ok:
+            return None
+        if risk_params.position_size_usdt < 10.0:
+            return None
+
+        # 슬리피지 적용
+        slip = close * self._s.BACKTEST_SLIPPAGE_PCT
+        if combined.direction == 1:
+            entry_price = close + slip
+        else:
+            entry_price = close - slip
+
+        fee = risk_params.position_size_usdt * self._s.BACKTEST_FEE_MAKER
+
+        return {
+            "symbol": symbol,
+            "side": "Buy" if combined.direction == 1 else "Sell",
+            "direction": combined.direction,
+            "entry_price": entry_price,
+            "entry_bar": bar_idx,
+            "entry_ts": int(df["ts"].iloc[bar_idx]) if "ts" in df.columns else 0,
+            "qty": risk_params.qty_base,
+            "leverage": risk_params.leverage,
+            "stop_price": risk_params.stop_price,
+            "tp1_price": risk_params.tp1_price,
+            "tp_price": risk_params.tp2_price,
+            "tp1_hit": False,
+            "partial_exit_pct": risk_params.partial_exit_pct,
+            "trailing_dist": atr_val * self._s.TRAILING_STOP_ATR_MULTIPLIER,
+            "highest": entry_price,
+            "lowest": entry_price,
+            "fees": fee,
+            "funding_cost": 0.0,
+            "bars": 0,
+            "atr": atr_val,
+            "trade_mode": trade_mode_str,
+            "max_bars": risk_params.mode_max_bars,
         }
 
     # ── Exit Check ────────────────────────────────────────────────────────────
@@ -481,8 +623,7 @@ class BacktestEngine:
             exit_price = pos["tp_price"]
             reason = "TAKE_PROFIT"
 
-        # Trailing stop — only activate after TP1 partial exit to avoid
-        # premature firing on normal market noise before profit is secured
+        # Trailing stop — only activate after TP1 partial exit
         elif direction == 1 and pos.get("tp1_hit", False):
             trailing = pos["highest"] - pos["trailing_dist"]
             if low <= trailing and trailing > pos["stop_price"]:
@@ -502,6 +643,12 @@ class BacktestEngine:
 
         if exit_price is None:
             return None
+
+        # Sanity check: exit price must be positive and within 50% of entry
+        entry = pos["entry_price"]
+        if exit_price <= 0 or exit_price > entry * 1.5 or exit_price < entry * 0.5:
+            exit_price = close  # fallback to current market price
+            reason = "TIME_EXIT"  # treat as forced exit
 
         # Apply slippage on exit
         slip = exit_price * self._s.BACKTEST_SLIPPAGE_PCT

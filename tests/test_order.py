@@ -120,16 +120,18 @@ class TestStateMachine:
 
     def test_trailing_stop_long(self):
         # Trailing stop only fires AFTER tp1 partial exit.
-        # Simulate: enter → trigger TP1 partial → price rises → trailing fires.
+        # Chandelier ratchet: adaptive_trail = max(trail_dist, profit * 0.40)
+        # entry=50000, high=52000, profit=2000, ratchet=max(750, 2000*0.4)=800
+        # trailing_stop = 52000 - 800 = 51200
+        # min_lock = 50000 * 1.002 = 50100 (below 51200, no effect)
         self._enter_long(entry=50000)
-        # Manually mark tp1 as hit (simulates partial_exit() being called)
         pos = self.sm.get_position("BTCUSDT")
         pos.tp1_hit = True
         pos.stop_price = 50000  # breakeven stop after TP1
         # Price rises to 52000 (new high), trailing dist=750
         self.sm.check_exit("BTCUSDT", current_price=52000, current_atr=500, signal_direction=0)
-        # Price drops 750 from high (52000-750=51250 > 50000 breakeven) → trailing fires
-        exit_sig = self.sm.check_exit("BTCUSDT", current_price=51249,
+        # Price drops below adaptive trail (52000-800=51200) → trailing fires
+        exit_sig = self.sm.check_exit("BTCUSDT", current_price=51199,
                                        current_atr=500, signal_direction=0)
         assert exit_sig.should_exit
         assert exit_sig.reason == ExitReason.TRAILING_STOP

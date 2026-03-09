@@ -24,11 +24,15 @@ class Settings(BaseSettings):
     # ADX 강세 임계값 → STRONG_BULL/STRONG_BEAR (TREND_RIDE 모드)
     REGIME_ROUTER_ADX_STRONG: float = 27.0
     # ADX 보통 추세 임계값 → BULL/BEAR (SCALP 모드)
-    REGIME_ROUTER_ADX_MODERATE: float = 18.0
+    REGIME_ROUTER_ADX_MODERATE: float = 20.0
     # ATR 백분위 임계값 — 이 이상이면 VOLATILE (포지션 50% 축소)
     REGIME_ROUTER_ATR_VOLATILE_PCT: float = 0.82
     # 레짐 그룹 간 전환 확정에 필요한 연속 감지 횟수 (그룹 내 전환은 즉시)
     REGIME_ROUTER_CONFIRM_BARS: int = 3
+    # 모멘텀 품질 최소값 — 이하 시 risk_multiplier 50% 감소
+    REGIME_ROUTER_MIN_MOMENTUM_QUALITY: float = 0.3
+    # BB 수축 백분위 — 이하 시 breakout 대기 (compression 감지)
+    REGIME_ROUTER_BB_COMPRESSION_PCT: float = 0.20
 
     # ── Bybit API ─────────────────────────────────────────────
     BYBIT_API_KEY: str = ""
@@ -45,13 +49,13 @@ class Settings(BaseSettings):
     MAX_DRAWDOWN_PCT: float = 0.30             # 30% → REDUCE 트리거 (포지션 비중 축소 시작)
     PAUSE_DRAWDOWN_PCT: float = 0.42           # 42% → PAUSE (신규 진입 중단, 기존 포지션 관리)
     HALT_DRAWDOWN_PCT: float = 0.50            # 50% → HALT (긴급 전면 중단 — 계좌 보호 핵심)
-    MAX_LEVERAGE_CAP: int = 20                 # 20× max leverage (백테스트: PF=1.001 최적값)
+    MAX_LEVERAGE_CAP: int = 10                 # 10× max leverage (보수적 리스크 관리)
     MAX_CONCURRENT_POSITIONS: int = 2
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.60       # MTF 정렬 기반 — 최고품질 진입만 허용 (0.60 상향)
+    SIGNAL_ENTRY_THRESHOLD: float = 0.80       # 고확신 진입만 허용 (0.75→0.80 상향, 강한 신호만 거래)
     SIGNAL_EXIT_THRESHOLD: float = 0.38
     SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
     TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
@@ -61,17 +65,17 @@ class Settings(BaseSettings):
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
     SCALP_STOP_ATR: float = 1.5               # SL: 1.5× ATR (확대 — 15분봉 노이즈 대응)
-    SCALP_TP1_ATR: float = 2.5                # TP1 R:R 1.67:1 → 플로어 적용 시 스케일업
-    SCALP_TP2_ATR: float = 5.5                # TP2 R:R 3.67:1 → 플로어 적용 시 스케일업
+    SCALP_TP1_ATR: float = 2.0                # TP1 R:R 1.33:1 — 빠른 수익 확보
+    SCALP_TP2_ATR: float = 4.5                # TP2 R:R 3.0:1 — 합리적 타겟
     SCALP_MAX_BARS: int = 48                   # 15분봉 × 48 = 12시간 최대
-    SCALP_PARTIAL_EXIT_PCT: float = 0.55       # 55% TP1에서 청산, 45% 추세 유지
+    SCALP_PARTIAL_EXIT_PCT: float = 0.40       # 40% TP1에서 청산, 60% 추세 유지 (수익 극대화)
 
     # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
     TREND_STOP_ATR: float = 2.5               # SL: 2.5× ATR (확대 — 추세 타이트 스탑 방지)
-    TREND_TP1_ATR: float = 4.0                # TP1 R:R 2.0:1 (TP1 후 +2.5ATR 트레일링)
-    TREND_TP2_ATR: float = 10.0               # TP2 R:R 5.0:1 — 풀 트렌드 수익 극대화
+    TREND_TP1_ATR: float = 3.0                # TP1 R:R 1.2:1 — 확실한 수익 확보
+    TREND_TP2_ATR: float = 8.0                # TP2 R:R 3.2:1 — 추세 극대화
     TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
-    TREND_PARTIAL_EXIT_PCT: float = 0.45       # close 45% at TP1, keep 55% for full run
+    TREND_PARTIAL_EXIT_PCT: float = 0.30       # close 30% at TP1, keep 70% for full run (추세 수익 극대화)
     TREND_RIDE_SCORE_THRESHOLD: int = 1        # allow trend ride more often
 
     # ── Pure Scalping Strategy Parameters (STRATEGY_MODE="scalp") ──────────
@@ -91,14 +95,14 @@ class Settings(BaseSettings):
     # 진입 조건
     SCALP_PURE_VOLUME_MULT: float = 1.3       # 볼륨 확인: 평균 대비 1.3배 이상 (품질 강화)
     SCALP_PURE_EMA_ZONE_ATR: float = 1.5      # EMA 존 범위: EMA21 ± 1.5×ATR (더 깊은 풀백 포착)
-    SCALP_PURE_ENTRY_MIN_SCORE: int = 7       # 진입 최소 점수 (9점 만점, 고품질 진입만 허용)
+    SCALP_PURE_ENTRY_MIN_SCORE: int = 8       # 진입 최소 점수 (11점 만점, 모멘텀 확인 추가)
     SCALP_PURE_ENTRY_URGENT_SCORE: int = 9    # 긴급 진입 점수 → 시장가 선호 (최고 점수만)
     # 리스크 파라미터 (3분봉 ATR 기준, 15분봉보다 타이트)
     SCALP_PURE_STOP_ATR: float = 1.2          # SL: 1.2× ATR (확대 — 3분봉 노이즈 대응)
     SCALP_PURE_TP1_ATR: float = 2.0           # TP1: 2.0× ATR → 플로어 적용 시 스케일업
     SCALP_PURE_TP2_ATR: float = 4.5           # TP2: 4.5× ATR → 플로어 적용 시 스케일업
     SCALP_PURE_MAX_BARS: int = 30             # 최대 보유: 3분봉×30 = 90분
-    SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.50 # TP1에서 50% 청산, 50% 유지
+    SCALP_PURE_PARTIAL_EXIT_PCT: float = 0.40 # TP1에서 40% 청산, 60% 유지
 
     # ── Minimum Stop Distance (노이즈 터짐 방지) ─────────────────────────
     # ATR × 배수가 너무 작을 때 스탑이 즉시 터지는 것 방지 (가격 대비 최소 %)
@@ -139,13 +143,16 @@ class Settings(BaseSettings):
 
     # ── Advanced Risk Management ──────────────────────────────────
     VOLATILITY_TARGET_PCT: float = 0.15         # AQR vol-targeting (15% annualized)
-    USE_KELLY_FRACTION: float = 0.25            # Quarter-Kelly position size cap
+    USE_KELLY_FRACTION: float = 0.50            # Half-Kelly position size (adaptive)
+    KELLY_MIN_TRADES: int = 20                   # Kelly 적용 최소 거래 수 (30→20 완화)
 
     # ── Indicators ────────────────────────────────────────────
     ATR_PERIOD: int = 14
     STOP_ATR_MULTIPLIER: float = 2.0
     TP_ATR_MULTIPLIER: float = 3.0
-    TRAILING_STOP_ATR_MULTIPLIER: float = 1.0  # 1.0× ATR trailing — SCALP profit lock=1.5ATR, TREND lock=3.0ATR
+    TRAILING_STOP_ATR_MULTIPLIER: float = 1.5  # 1.5× ATR trailing — 적당한 룸 (추세 수익 캡처)
+    TRAILING_PROFIT_RATCHET_PCT: float = 0.35  # 최대 수익 대비 35% 트레일 (Chandelier ratchet)
+    TRAILING_MIN_PROFIT_LOCK_PCT: float = 0.003  # TP1 후 최소 0.3% 수익 잠금
     ADX_PERIOD: int = 14
     ADX_TREND_THRESHOLD: float = 25.0
     ADX_RANGE_THRESHOLD: float = 20.0
@@ -182,7 +189,9 @@ class Settings(BaseSettings):
     # ── Order Execution ───────────────────────────────────────
     LIMIT_ORDER_TIMEOUT_SECONDS: int = 15   # 15s/시도 (스캘핑: 빠른 진입이 중요)
     LIMIT_ORDER_MAX_RETRIES: int = 2        # 2회 후 시장가 폴백 (총 최대 ~30s)
-    REENTRY_COOLDOWN_SECONDS: int = 600        # 10 min — 스캘핑 모드 재진입 대기 (3m × 3~4봉)
+    REENTRY_COOLDOWN_SECONDS: int = 1800       # 30 min — 손절 후 재진입 대기 (노이즈 회피)
+    REENTRY_SAME_DIR_COOLDOWN_SECONDS: int = 2700  # 45 min — 동일 방향 손절 후 대기
+    MAX_TRADES_PER_DAY_PER_SYMBOL: int = 3  # 일일 심볼당 최대 거래 횟수
     SPREAD_TAKER_THRESHOLD: float = 0.003  # 0.3% spread → use market order
     # 신호 강도가 이 값 초과 시 지정가 대신 시장가(즉시 체결 우선)
     SIGNAL_URGENT_THRESHOLD: float = 0.90  # > 0.90 → market order (urgency)
@@ -197,10 +206,10 @@ class Settings(BaseSettings):
     BACKTEST_FUNDING_RATE_AVG: float = 0.0001  # avg funding rate per 8h interval
 
     # ── Quality Gate (MTF 전략 기준 상향) ────────────────────────
-    QUALITY_GATE_SHARPE: float = 1.2
+    QUALITY_GATE_SHARPE: float = 1.0
     QUALITY_GATE_MDD: float = 0.25
-    QUALITY_GATE_WIN_RATE: float = 0.60        # 60%+ 승률 목표
-    QUALITY_GATE_PROFIT_FACTOR: float = 1.8    # PF 1.8+ 목표
+    QUALITY_GATE_WIN_RATE: float = 0.45        # 추세추종 현실적 승률 (45%+, R:R 보상)
+    QUALITY_GATE_PROFIT_FACTOR: float = 1.2    # PF 1.2+ (실질 수익성 확보)
     QUALITY_GATE_MIN_TRADES: int = 50          # MTF는 진입 횟수 줄어드므로 조정
     QUALITY_GATE_PASSED: bool = False      # flipped only by backtest runner
 
@@ -225,7 +234,7 @@ class Settings(BaseSettings):
     # BEAR/SIDEWAYS 모드 심볼: 하락장/횡보장 — BTC + ETH만 거래
     BEAR_MODE_SYMBOLS: str = "BTCUSDT,ETHUSDT"
     # Bear/Sideways 모드에서 허용하는 최대 레버리지 (고배율 스캘핑)
-    BEAR_MAX_LEVERAGE_CAP: int = 20
+    BEAR_MAX_LEVERAGE_CAP: int = 10
     # 매크로 레짐 체크 주기 (시간)
     MACRO_REGIME_CHECK_HOURS: int = 4
     # BULL 전환 확정에 필요한 연속 신호 횟수

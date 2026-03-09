@@ -370,10 +370,10 @@ class TestHighLeverageMode:
         engine = self._make_engine()
         result = self._calc(engine, signal_strength=0.90)
         assert result.risk_ok, result.reason
-        # stop_atr_scale=0.65 → stop=1.5×0.5%×0.65=0.4875%,  min_floor=0.7% → floor 적용
-        # base_lev = 16% / 0.7% = 22.9× (dampening 후 ~16×)
-        # 넓어진 스탑으로 노이즈 터짐 방지 → 레버리지는 적정 수준으로 조정됨
-        assert result.leverage >= 12, f"Expected ≥12×, got {result.leverage}×"
+        # 보수적 리스크: stop_atr_scale=0.75, trade_risk=6% → 실제 4-6×
+        # 레버리지 상한 10× (보수적 리스크 관리)
+        assert result.leverage >= 3, f"Expected ≥3×, got {result.leverage}×"
+        assert result.leverage <= 10, f"Expected ≤10×, got {result.leverage}×"
 
     def test_signal_tiers_ascending_leverage(self):
         """시그널 강도 증가 → 레버리지 단조 증가."""

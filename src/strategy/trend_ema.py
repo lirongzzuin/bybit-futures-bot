@@ -222,8 +222,7 @@ class TrendEMAStrategy:
     ) -> CombinedSignal:
         """
         BULL_TREND: EMA21 풀백 구간 LONG 진입.
-
-        전략: 상승 추세에서 EMA21로 눌림 후 재상승 타이밍 포착.
+        모멘텀 재개 하드필터 적용 — 풀백이 끝나고 실제 반등 확인 후 진입.
         """
         current_price = float(close.iloc[-1])
         ltf_ema9 = float(ema(close, 9).iloc[-1])
@@ -232,6 +231,19 @@ class TrendEMAStrategy:
         current_vol = float(volume.iloc[-1])
         avg_vol = float(volume.tail(20).mean()) if len(volume) >= 20 else current_vol
 
+        # ── 하드 필터: 모멘텀 재개 확인 (3-bar pattern) ──────────────────
+        # 풀백 후 모멘텀 재개를 확인하지 않으면 떨어지는 칼날을 잡을 위험
+        if len(close) >= 4:
+            closes = close.iloc[-4:-1].values  # 직전 3봉
+            lows = low.iloc[-3:-1].values      # 직전 2봉 low
+            momentum_ok = (
+                (closes[2] > closes[1] > closes[0]) or  # 3봉 연속 상승
+                (lows[1] > lows[0])                       # higher low 형성
+            )
+            if not momentum_ok:
+                log.debug("TrendEMA BULL: momentum not resuming — skipping")
+                return self._neutral()
+
         score = 0
 
         # 조건 1: LTF EMA 정렬 (핵심 +2점)
@@ -239,20 +251,20 @@ class TrendEMAStrategy:
             score += 2
 
         # 조건 2: 가격이 EMA21 풀백 존 내 (+1점)
-        zone_atr = self._s.TREND_EMA_ZONE_ATR_MULT  # 기본 1.5
+        zone_atr = self._s.TREND_EMA_ZONE_ATR_MULT
         zone_low = ltf_ema21 - ltf_atr_val * zone_atr
         zone_high = ltf_ema21 + ltf_atr_val * zone_atr
         if zone_low <= current_price <= zone_high:
             score += 1
 
         # 조건 3: RSI 매수 범위 (+1점)
-        rsi_min = self._s.TREND_EMA_RSI_BULL_MIN   # 40.0
-        rsi_max = self._s.TREND_EMA_RSI_BULL_MAX   # 58.0
+        rsi_min = self._s.TREND_EMA_RSI_BULL_MIN
+        rsi_max = self._s.TREND_EMA_RSI_BULL_MAX
         if rsi_min <= ltf_rsi <= rsi_max:
             score += 1
 
         # 조건 4: 거래량 확인 (+1점)
-        vol_mult = self._s.TREND_EMA_VOLUME_MULT   # 1.2
+        vol_mult = self._s.TREND_EMA_VOLUME_MULT
         if avg_vol > 0 and current_vol >= avg_vol * vol_mult:
             score += 1
 
@@ -262,7 +274,7 @@ class TrendEMAStrategy:
         if spread_pct > 0.002:
             score -= 1
 
-        min_score = self._s.TREND_EMA_MIN_SCORE  # 3
+        min_score = self._s.TREND_EMA_MIN_SCORE
         if score >= min_score:
             strength = _TREND_SCORE_STRENGTH.get(min(score, 5), 0.65)
             return CombinedSignal(
@@ -289,8 +301,7 @@ class TrendEMAStrategy:
     ) -> CombinedSignal:
         """
         BEAR_TREND: EMA21 반등 구간 SHORT 진입.
-
-        전략: 하락 추세에서 EMA21로 반등 후 재하락 타이밍 포착.
+        모멘텀 재개 하드필터 적용 — 반등이 끝나고 실제 재하락 확인 후 진입.
         """
         current_price = float(close.iloc[-1])
         ltf_ema9 = float(ema(close, 9).iloc[-1])
@@ -299,6 +310,18 @@ class TrendEMAStrategy:
         current_vol = float(volume.iloc[-1])
         avg_vol = float(volume.tail(20).mean()) if len(volume) >= 20 else current_vol
 
+        # ── 하드 필터: 하락 모멘텀 재개 확인 ────────────────────────────
+        if len(close) >= 4:
+            closes = close.iloc[-4:-1].values
+            highs = high.iloc[-3:-1].values
+            momentum_ok = (
+                (closes[2] < closes[1] < closes[0]) or  # 3봉 연속 하락
+                (highs[1] < highs[0])                     # lower high 형성
+            )
+            if not momentum_ok:
+                log.debug("TrendEMA BEAR: momentum not resuming — skipping")
+                return self._neutral()
+
         score = 0
 
         # 조건 1: LTF EMA 정렬 (하락 방향, 핵심 +2점)
@@ -306,20 +329,20 @@ class TrendEMAStrategy:
             score += 2
 
         # 조건 2: 가격이 EMA21 반등 존 내 (+1점)
-        zone_atr = self._s.TREND_EMA_ZONE_ATR_MULT  # 1.5
+        zone_atr = self._s.TREND_EMA_ZONE_ATR_MULT
         zone_low = ltf_ema21 - ltf_atr_val * zone_atr
         zone_high = ltf_ema21 + ltf_atr_val * zone_atr
         if zone_low <= current_price <= zone_high:
             score += 1
 
-        # 조건 3: RSI 숏 범위 (과매도 아님, +1점)
-        rsi_min = self._s.TREND_EMA_RSI_BEAR_MIN   # 42.0
-        rsi_max = self._s.TREND_EMA_RSI_BEAR_MAX   # 60.0
+        # 조건 3: RSI 숏 범위 (+1점)
+        rsi_min = self._s.TREND_EMA_RSI_BEAR_MIN
+        rsi_max = self._s.TREND_EMA_RSI_BEAR_MAX
         if rsi_min <= ltf_rsi <= rsi_max:
             score += 1
 
         # 조건 4: 거래량 확인 (+1점)
-        vol_mult = self._s.TREND_EMA_VOLUME_MULT   # 1.2
+        vol_mult = self._s.TREND_EMA_VOLUME_MULT
         if avg_vol > 0 and current_vol >= avg_vol * vol_mult:
             score += 1
 
@@ -329,7 +352,7 @@ class TrendEMAStrategy:
         if spread_pct > 0.002:
             score -= 1
 
-        min_score = self._s.TREND_EMA_MIN_SCORE  # 3
+        min_score = self._s.TREND_EMA_MIN_SCORE
         if score >= min_score:
             strength = _TREND_SCORE_STRENGTH.get(min(score, 5), 0.65)
             return CombinedSignal(

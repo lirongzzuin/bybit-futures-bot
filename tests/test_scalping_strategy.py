@@ -387,7 +387,7 @@ class TestScalpingStrategyScoreDetails:
         expected_keys = {
             "htf_ema_bull", "htf_vwap_bull", "ltf_ema_aligned",
             "price_in_zone", "rsi_in_zone", "volume_spike",
-            "bull_candle", "adverse_funding", "wide_spread",
+            "bull_candle", "momentum_resume", "adverse_funding", "wide_spread",
         }
         assert expected_keys == set(details.keys())
 
@@ -413,7 +413,7 @@ class TestScalpingStrategyScoreDetails:
         expected_keys = {
             "htf_ema_bear", "htf_vwap_bear", "ltf_ema_aligned",
             "price_in_zone", "rsi_in_zone", "volume_spike",
-            "bear_candle", "adverse_funding", "wide_spread",
+            "bear_candle", "momentum_resume", "adverse_funding", "wide_spread",
         }
         assert expected_keys == set(details.keys())
 
@@ -681,7 +681,7 @@ class TestScalpingStrategySignalDetail:
         detail = self.strategy.get_signal_detail(df, None)
         assert detail is not None
         assert isinstance(detail, ScalpSignalDetail)
-        assert detail.max_score == 9  # _MAX_POSITIVE_SCORE
+        assert detail.max_score == 11  # _MAX_POSITIVE_SCORE (모멘텀 확인 +2 추가)
         assert detail.direction in (-1, 0, 1)
         assert detail.atr_val > 0
         assert isinstance(detail.long_details, dict)

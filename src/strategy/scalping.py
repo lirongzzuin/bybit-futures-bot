@@ -62,18 +62,21 @@ from src.strategy.regime import Regime
 log = get_logger(__name__)
 
 # 점수 계산 상수
-_MAX_POSITIVE_SCORE = 9   # htf_ema(2) + htf_vwap(1) + ltf_ema(2) + zone(1) + rsi(1) + vol(1) + candle(1)
+# htf_ema(2) + htf_vwap(1) + ltf_ema(2) + zone(1) + rsi(1) + vol(1) + candle(1) + momentum(2) = 11
+_MAX_POSITIVE_SCORE = 11
 _MAX_PENALTY_SCORE = -2   # adverse_funding(-1) + wide_spread(-1)
 
 # 레버리지 티어 경계 정렬 강도 매핑 (engine.py 티어 기준)
 # engine.py 티어: <0.65→2-3×, ≥0.65→4-5×, ≥0.75→8-10×, ≥0.80→15-18×, ≥0.85→20×
 # score 9만 SIGNAL_URGENT_THRESHOLD(0.90) 초과 → 시장가(Taker) 트리거
 _SCORE_STRENGTH_MAP: dict[int, float] = {
-    5: 0.60,   # < 0.65 → default tier (2-3×)
-    6: 0.69,   # ≥ 0.65 → 4-5× tier
-    7: 0.77,   # ≥ 0.75 → 8-10× tier
-    8: 0.83,   # ≥ 0.80 → 15-18× tier
-    # 9 → urgent_threshold + 0.01 = 0.91 → ≥0.85(20×) + Market 트리거
+    5: 0.55,   # < 0.65 → below threshold (진입 불가)
+    6: 0.60,   # < 0.65 → below threshold (진입 불가 with 0.70 threshold)
+    7: 0.69,   # ≥ 0.65 → 4-5× tier
+    8: 0.77,   # ≥ 0.75 → 8-10× tier (최소 진입, min_score=8)
+    9: 0.83,   # ≥ 0.80 → 15-18× tier
+    10: 0.87,  # ≥ 0.85 → 20× tier
+    # 11 → urgent_threshold + 0.01 = 0.91 → ≥0.85(20×) + Market 트리거
 }
 
 
@@ -222,7 +225,9 @@ class ScalpingStrategy:
             has_htf=has_htf,
             funding_rate=funding_rate,
             spread_pct=spread_pct,
-            current_low=current_low,   # 하단 윅 리젝션 계산용
+            current_low=current_low,
+            close_series=close_ltf,
+            low_series=low_ltf,
         )
 
         short_score, short_details = self._score_short(
@@ -241,7 +246,9 @@ class ScalpingStrategy:
             has_htf=has_htf,
             funding_rate=funding_rate,
             spread_pct=spread_pct,
-            current_high=current_high,  # 상단 윅 리젝션 계산용
+            current_high=current_high,
+            close_series=close_ltf,
+            high_series=high_ltf,
         )
 
         min_score = self._s.SCALP_PURE_ENTRY_MIN_SCORE
@@ -456,47 +463,39 @@ class ScalpingStrategy:
         has_htf: bool,
         funding_rate: float,
         spread_pct: float,
-        current_low: float = 0.0,   # 하단 윅 리젝션 계산용 (핀바 패턴)
+        current_low: float = 0.0,
+        close_series: Optional[pd.Series] = None,
+        low_series: Optional[pd.Series] = None,
     ) -> Tuple[int, Dict[str, int]]:
-        """롱 진입 스코어 계산 (9점 만점)."""
+        """롱 진입 스코어 계산 (11점 만점 — 모멘텀 확인 추가)."""
         d: Dict[str, int] = {}
 
         # ── HTF 바이어스 (최대 +3) ─────────────────────────────────────────
         if has_htf and htf_ema9 > 0 and htf_ema21 > 0:
-            # +2: HTF EMA9 > EMA21 (단기 상승 추세)
             d["htf_ema_bull"] = 2 if htf_ema9 > htf_ema21 else 0
-            # +1: 가격이 VWAP 위 (세션 내 수요 우위)
             d["htf_vwap_bull"] = 1 if (htf_vwap > 0 and htf_price > htf_vwap) else 0
         else:
-            # HTF 데이터 없음: 바이어스 점수 0 (진입 가능하지만 낮은 점수)
             d["htf_ema_bull"] = 0
             d["htf_vwap_bull"] = 0
 
         # ── LTF EMA 정렬 (최대 +2) ────────────────────────────────────────
-        # +2: EMA9 > EMA21 (단기 상승 추세 확인)
         d["ltf_ema_aligned"] = 2 if (ltf_ema9 > ltf_ema21 and ltf_ema21 > 0) else 0
 
         # ── 가격 EMA 존 (최대 +1) ──────────────────────────────────────────
-        # +1: 현재 가격이 EMA21 ± (ATR × EMA_ZONE_ATR) 내 (풀백 진입 구간)
         zone_threshold = ltf_atr * self._s.SCALP_PURE_EMA_ZONE_ATR
         d["price_in_zone"] = 1 if (ltf_ema21 > 0 and abs(current_price - ltf_ema21) <= zone_threshold) else 0
 
         # ── RSI 모멘텀 구간 (최대 +1) ─────────────────────────────────────
-        # +1: RSI가 40–65 범위 (모멘텀 형성 중, 과매수 아님)
         rsi_min = self._s.SCALP_PURE_RSI_LONG_MIN
         rsi_max = self._s.SCALP_PURE_RSI_LONG_MAX
         d["rsi_in_zone"] = 1 if (rsi_min <= ltf_rsi <= rsi_max) else 0
 
         # ── 볼륨 확인 (최대 +1) ────────────────────────────────────────────
-        # +1: 현재 봉 볼륨 ≥ 20봉 평균 × VOLUME_MULT
         vol_mult = self._s.SCALP_PURE_VOLUME_MULT
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
         # ── 캔들 방향/품질 (최대 +1) ───────────────────────────────────────
-        # +1: 양봉 바디 > 0.15×ATR (방향성 확인)
-        # OR: 강한 하단 윅 리젝션 > 0.35×ATR AND 윅이 바디의 2배 이상 (핀바 패턴)
-        #   → EMA 지지에서 하단 윅 핀바 = 고확률 반등 신호
-        candle_body = current_price - current_open  # positive = bullish
+        candle_body = current_price - current_open
         bull_body = (candle_body >= ltf_atr * 0.15)
         if current_low > 0:
             lower_wick = min(current_price, current_open) - current_low
@@ -505,10 +504,24 @@ class ScalpingStrategy:
             wick_rejection = False
         d["bull_candle"] = 1 if (bull_body or wick_rejection) else 0
 
+        # ── 모멘텀 재개 확인 (최대 +2) — Linda Raschke 3-bar pattern ──────
+        # 풀백 후 실제 모멘텀 재개 여부 확인 (핵심 승률 개선 요소)
+        # +2: 최근 3봉 close 연속 상승 (강한 모멘텀 재개)
+        # +1: 최근 2봉 중 higher low 형성 (약한 모멘텀 재개)
+        # +0: 모멘텀 재개 미확인 → 진입 품질 저하
+        d["momentum_resume"] = 0
+        if close_series is not None and len(close_series) >= 4:
+            closes = close_series.iloc[-4:-1].values  # 직전 3봉 (현재봉 제외)
+            if len(closes) == 3:
+                if closes[2] > closes[1] > closes[0]:
+                    d["momentum_resume"] = 2  # 3봉 연속 상승
+                elif low_series is not None and len(low_series) >= 3:
+                    lows = low_series.iloc[-3:-1].values
+                    if len(lows) == 2 and lows[1] > lows[0]:
+                        d["momentum_resume"] = 1  # higher low 형성
+
         # ── 패널티 ────────────────────────────────────────────────────────
-        # -1: 펀딩 비율 과다 (한쪽 포지션 쏠림 위험)
         d["adverse_funding"] = -1 if abs(funding_rate) > 0.001 else 0
-        # -1: 스프레드 과다 (체결 비용 증가)
         d["wide_spread"] = -1 if spread_pct > 0.002 else 0
 
         score = sum(d.values())
@@ -533,9 +546,11 @@ class ScalpingStrategy:
         has_htf: bool,
         funding_rate: float,
         spread_pct: float,
-        current_high: float = 0.0,  # 상단 윅 리젝션 계산용 (핀바 패턴)
+        current_high: float = 0.0,
+        close_series: Optional[pd.Series] = None,
+        high_series: Optional[pd.Series] = None,
     ) -> Tuple[int, Dict[str, int]]:
-        """숏 진입 스코어 계산 (9점 만점, 롱의 정반대 조건)."""
+        """숏 진입 스코어 계산 (11점 만점, 모멘텀 확인 추가)."""
         d: Dict[str, int] = {}
 
         # ── HTF 바이어스 (하락 방향) ──────────────────────────────────────
@@ -553,7 +568,7 @@ class ScalpingStrategy:
         zone_threshold = ltf_atr * self._s.SCALP_PURE_EMA_ZONE_ATR
         d["price_in_zone"] = 1 if (ltf_ema21 > 0 and abs(current_price - ltf_ema21) <= zone_threshold) else 0
 
-        # ── RSI 모멘텀 구간 (숏: 35–60) ───────────────────────────────────
+        # ── RSI 모멘텀 구간 ───────────────────────────────────────────────
         rsi_min = self._s.SCALP_PURE_RSI_SHORT_MIN
         rsi_max = self._s.SCALP_PURE_RSI_SHORT_MAX
         d["rsi_in_zone"] = 1 if (rsi_min <= ltf_rsi <= rsi_max) else 0
@@ -562,11 +577,8 @@ class ScalpingStrategy:
         vol_mult = self._s.SCALP_PURE_VOLUME_MULT
         d["volume_spike"] = 1 if (avg_vol > 0 and current_vol >= avg_vol * vol_mult) else 0
 
-        # ── 캔들 방향/품질 (음봉 또는 상단 윅 리젝션) ────────────────────────
-        # +1: 음봉 바디 > 0.15×ATR (방향성 있는 음봉)
-        # OR: 강한 상단 윅 리젝션 > 0.35×ATR AND 윅이 바디의 2배 이상 (역핀바 패턴)
-        #   → EMA 저항에서 상단 윅 = 고확률 하락 신호
-        candle_body_s = current_open - current_price  # positive = bearish
+        # ── 캔들 방향/품질 ────────────────────────────────────────────────
+        candle_body_s = current_open - current_price
         bear_body = (candle_body_s >= ltf_atr * 0.15)
         if current_high > 0:
             upper_wick = current_high - max(current_price, current_open)
@@ -574,6 +586,20 @@ class ScalpingStrategy:
         else:
             wick_rejection_s = False
         d["bear_candle"] = 1 if (bear_body or wick_rejection_s) else 0
+
+        # ── 모멘텀 재개 확인 (최대 +2) — 하락 모멘텀 재개 ─────────────────
+        # +2: 최근 3봉 close 연속 하락 (강한 하락 모멘텀)
+        # +1: 최근 2봉 중 lower high 형성 (약한 하락 모멘텀)
+        d["momentum_resume"] = 0
+        if close_series is not None and len(close_series) >= 4:
+            closes = close_series.iloc[-4:-1].values
+            if len(closes) == 3:
+                if closes[2] < closes[1] < closes[0]:
+                    d["momentum_resume"] = 2  # 3봉 연속 하락
+                elif high_series is not None and len(high_series) >= 3:
+                    highs = high_series.iloc[-3:-1].values
+                    if len(highs) == 2 and highs[1] < highs[0]:
+                        d["momentum_resume"] = 1  # lower high 형성
 
         # ── 패널티 ────────────────────────────────────────────────────────
         d["adverse_funding"] = -1 if abs(funding_rate) > 0.001 else 0

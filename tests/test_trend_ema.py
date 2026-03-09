@@ -113,15 +113,20 @@ def make_strongly_trending_down(n: int = 300) -> pd.DataFrame:
 
 
 def make_bull_pullback_ltf(n: int = 300) -> pd.DataFrame:
-    """Bull trend with recent consolidation — EMA9>EMA21, RSI in 40-60, volume spike."""
+    """Bull trend with recent consolidation + momentum resumption.
+    EMA9>EMA21, RSI in 40-60, volume spike, 마지막 3봉 상승 (모멘텀 확인)."""
     np.random.seed(15)
     prices = [50000.0]
     up_bars = int(n * 0.8)
     for _ in range(up_bars - 1):
         prices.append(prices[-1] * (1 + np.random.uniform(0.001, 0.003)))
-    # Consolidate last 20% — price cools RSI into 40-60 range
-    for _ in range(n - up_bars):
+    # Consolidate most of last 20% — price cools RSI into 40-60 range
+    consol_bars = n - up_bars - 3  # 마지막 3봉은 모멘텀 재개용
+    for _ in range(consol_bars):
         prices.append(prices[-1] * (1 + np.random.uniform(-0.0005, 0.0005)))
+    # 마지막 3봉: 모멘텀 재개 — 연속 상승 (momentum confirmation)
+    for _ in range(3):
+        prices.append(prices[-1] * (1 + np.random.uniform(0.0005, 0.0015)))
     close = np.array(prices)
     high = close * 1.002
     low = close * 0.998
@@ -135,15 +140,20 @@ def make_bull_pullback_ltf(n: int = 300) -> pd.DataFrame:
 
 
 def make_bear_pullback_ltf(n: int = 300) -> pd.DataFrame:
-    """Bear trend with recent consolidation — EMA9<EMA21, RSI in 42-60, volume spike."""
+    """Bear trend with recent consolidation + momentum resumption.
+    EMA9<EMA21, RSI in 42-60, volume spike, 마지막 3봉 하락 (모멘텀 확인)."""
     np.random.seed(25)
     prices = [50000.0]
     down_bars = int(n * 0.8)
     for _ in range(down_bars - 1):
         prices.append(prices[-1] * (1 - np.random.uniform(0.001, 0.003)))
-    # Consolidate last 20%
-    for _ in range(n - down_bars):
+    # Consolidate most of last 20%
+    consol_bars = n - down_bars - 3
+    for _ in range(consol_bars):
         prices.append(prices[-1] * (1 + np.random.uniform(-0.0005, 0.0005)))
+    # 마지막 3봉: 하락 모멘텀 재개 — 연속 하락
+    for _ in range(3):
+        prices.append(prices[-1] * (1 - np.random.uniform(0.0005, 0.0015)))
     close = np.array(prices)
     high = close * 1.002
     low = close * 0.998

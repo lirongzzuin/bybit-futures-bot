@@ -128,28 +128,42 @@ class RiskEngine:
         dd_escalation_allowed = drawdown_pct <= 0.15
 
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
+        # 보수적 리스크 관리: 1회 손실 = 자본의 1-3% 이내
+        # 고레버리지 과거 손실 원인 → 레버리지 4-8× 범위로 제한
         if signal_strength >= 0.85 and dd_escalation_allowed:
-            stop_atr_scale = 0.65           # 넉넉한 스탑 → 노이즈 터짐 방지
-            trade_risk_pct = min(0.16, target_risk * 8.0)   # 목표 레버리지: ~15-20× (캡)
+            stop_atr_scale = 0.75           # 넉넉한 스탑 → 노이즈 터짐 방지
+            trade_risk_pct = min(0.06, target_risk * 3.0)   # 목표 레버리지: ~6-8×
         elif signal_strength >= 0.80 and dd_escalation_allowed:
-            stop_atr_scale = 0.75
-            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~10-12×
+            stop_atr_scale = 0.80
+            trade_risk_pct = min(0.05, target_risk * 2.5)   # 목표 레버리지: ~5-6×
         elif signal_strength >= 0.75 and dd_escalation_allowed:
             stop_atr_scale = 0.85
-            trade_risk_pct = min(0.09, target_risk * 4.5)   # 목표 레버리지: ~7-9×
+            trade_risk_pct = min(0.04, target_risk * 2.0)   # 목표 레버리지: ~4-5×
         elif signal_strength >= 0.65:
             stop_atr_scale = 0.92
-            trade_risk_pct = min(0.06, target_risk * 3.0)   # 목표 레버리지: ~4-5×
+            trade_risk_pct = min(0.03, target_risk * 1.5)   # 목표 레버리지: ~2-3×
         else:
             stop_atr_scale = 1.00
-            trade_risk_pct = min(0.04, target_risk * 2.0)   # 기본값: ~2-3×
+            trade_risk_pct = min(0.02, target_risk * 1.0)   # 기본값: ~1-2×
 
-        # ── Step 1: Stop distance (signal-scaled + minimum floor) ─────────────
-        # 기본: ATR × 배수 × 신호스케일
-        # 최소 플로어: 타임프레임 노이즈 대비 최소 스탑 거리 보장
-        #   → 3분봉 ATR은 15분봉보다 ~3× 작으므로 TREND_RIDE 모드에서 특히 중요
-        #   → 플로어 적용 시 TP도 동일 비율 스케일업 → R:R 유지
-        stop_distance = atr * stop_atr_mult * stop_atr_scale
+        # ── Step 1: Stop distance (signal-scaled + vol-adjusted + minimum floor) ──
+        # 변동성 적응형 스탑: ATR이 작을수록 배수 확대 (노이즈 대비)
+        atr_pct = atr / entry_price if entry_price > 0 else 0.01
+        if atr_pct < 0.003:      # 매우 낮은 변동성 (< 0.3%)
+            vol_stop_mult = 2.0   # 스탑 2배 확대 (노이즈 회피)
+        elif atr_pct < 0.006:    # 낮은 변동성
+            vol_stop_mult = 1.5
+        elif atr_pct < 0.012:    # 보통 변동성
+            vol_stop_mult = 1.0
+        else:                     # 높은 변동성
+            vol_stop_mult = 0.85  # 살짝 축소 (자연 변동이 충분)
+
+        stop_distance = atr * stop_atr_mult * stop_atr_scale * vol_stop_mult
+        # 수수료 체크용 원본 TP1 저장 (vol 스케일 미적용)
+        raw_tp1_atr_mult = tp1_atr_mult
+        # TP도 동일한 vol_stop_mult 적용 → R:R 비율 유지
+        tp1_atr_mult *= vol_stop_mult
+        tp2_atr_mult *= vol_stop_mult
 
         # 모드별 최소 스탑 거리 플로어
         _min_stop_pct_map = {
@@ -257,9 +271,13 @@ class RiskEngine:
                     if vol_target_qty > 0:
                         qty_base = min(qty_base, vol_target_qty)
 
-        # ── Quarter-Kelly position size cap (Van K. Tharp) ───────────────────
+        # ── Adaptive Half-Kelly position sizing (적응형 켈리) ────────────────
+        # 기존: 고정 risk_pct → Kelly는 보조 캡
+        # 개선: Kelly를 주요 사이징 기준으로 사용 (충분한 데이터 있을 때)
+        #       signal_strength로 Kelly fraction 스케일 → 강한 신호에 더 배팅
         kelly_qty: float = 0.0
-        if win_stats is not None and win_stats.get("n_trades", 0) >= 30:
+        kelly_min_trades = self._s.KELLY_MIN_TRADES  # 20
+        if win_stats is not None and win_stats.get("n_trades", 0) >= kelly_min_trades:
             wr = float(win_stats.get("win_rate", 0.5))
             avg_win = float(win_stats.get("avg_win", 1.0))
             avg_loss = float(win_stats.get("avg_loss", 1.0))
@@ -267,11 +285,17 @@ class RiskEngine:
                 r_ratio = avg_win / avg_loss
                 kelly_f = wr - (1.0 - wr) / r_ratio
                 kelly_f = max(0.0, kelly_f)
-                # Quarter-Kelly risk amount, converted to qty via stop distance
-                quarter_kelly_risk = equity * kelly_f * self._s.USE_KELLY_FRACTION
-                kelly_qty = quarter_kelly_risk / stop_distance
+                # Half-Kelly × signal_strength → 강한 신호에 더 많은 자본 배분
+                effective_kelly = kelly_f * self._s.USE_KELLY_FRACTION * signal_strength
+                kelly_risk = equity * min(effective_kelly, 0.10)  # 최대 10% 하드캡
+                kelly_qty = kelly_risk / stop_distance
                 if kelly_qty > 0:
                     qty_base = min(qty_base, kelly_qty)
+                    log.debug(
+                        "Kelly sizing | wr=%.2f r_ratio=%.2f kelly_f=%.3f "
+                        "effective=%.3f risk=%.2f qty=%.4f",
+                        wr, r_ratio, kelly_f, effective_kelly, kelly_risk, kelly_qty,
+                    )
 
         # Clamp to total exposure limit
         max_notional_per_trade = equity * self._s.MAX_SINGLE_EXPOSURE_PCT * final_leverage
@@ -319,9 +343,9 @@ class RiskEngine:
         round_trip_fee_pct = (
             entry_fee_rate + self._s.BACKTEST_FEE_MAKER + self._s.BACKTEST_SLIPPAGE_PCT * 2
         )
-        # 수수료 손익분기점 체크: 플로어 적용 전 원본 TP1 기준 사용
-        # → ATR이 너무 작아 자연 TP1이 수수료를 못 커버하면 진입 거부 (플로어 스케일업은 미적용)
-        tp1_move_pct = (atr * tp1_atr_mult) / entry_price
+        # 수수료 손익분기점 체크: vol 스케일 미적용 원본 TP1 기준 사용
+        # → ATR이 너무 작아 자연 TP1이 수수료를 못 커버하면 진입 거부
+        tp1_move_pct = (atr * raw_tp1_atr_mult) / entry_price
 
         # ── 모드별 수수료 안전 배수 ──────────────────────────────────────────
         # PURE_SCALP (3분봉): TP1=2.0×ATR — R:R 2:1 (개선)

@@ -34,7 +34,7 @@ import pandas as pd
 
 from src.config import Settings
 from src.logger import get_logger
-from src.strategy.indicators import adx as calc_adx, atr as calc_atr, ema, volatility_percentile
+from src.strategy.indicators import adx as calc_adx, atr as calc_atr, bollinger_bands, ema, volatility_percentile
 
 log = get_logger(__name__)
 
@@ -76,12 +76,12 @@ class RouterResult:
 # ── 레짐 → 전략 라우팅 테이블 ────────────────────────────────────────────────────
 # (strategy, trade_mode, direction_bias, risk_multiplier, leverage_cap)
 _ROUTING_TABLE: Dict[DynamicRegime, Tuple[str, str, int, float, int]] = {
-    DynamicRegime.STRONG_BULL: ("trend", "TREND_RIDE", +1, 1.00, 20),
-    DynamicRegime.BULL:        ("trend", "SCALP",       +1, 0.90, 15),
-    DynamicRegime.SIDEWAYS:    ("scalp", "PURE_SCALP",   0, 0.80, 10),
-    DynamicRegime.BEAR:        ("trend", "SCALP",       -1, 0.90, 15),
-    DynamicRegime.STRONG_BEAR: ("trend", "TREND_RIDE",  -1, 1.00, 20),
-    DynamicRegime.VOLATILE:    ("scalp", "PURE_SCALP",   0, 0.50,  8),
+    DynamicRegime.STRONG_BULL: ("trend", "TREND_RIDE", +1, 1.00, 10),
+    DynamicRegime.BULL:        ("trend", "SCALP",       +1, 0.80, 8),
+    DynamicRegime.SIDEWAYS:    ("skip",  "",              0, 0.00,  0),
+    DynamicRegime.BEAR:        ("trend", "SCALP",       -1, 0.80, 8),
+    DynamicRegime.STRONG_BEAR: ("trend", "TREND_RIDE",  -1, 1.00, 10),
+    DynamicRegime.VOLATILE:    ("skip",  "",              0, 0.00,  0),
     DynamicRegime.TRANSITION:  ("skip",  "",              0, 0.00,  0),
 }
 
@@ -210,14 +210,22 @@ class RegimeRouter:
         self, df: pd.DataFrame
     ) -> Tuple[DynamicRegime, float, str]:
         """
-        60m 봉에서 EMA/ADX/ATR 기반 장세 분류.
+        60m 봉에서 다중 팩터 장세 분류 (Enhanced Multi-Factor).
+
+        팩터:
+          1. EMA 정렬 (기존)
+          2. ADX 강도 (기존)
+          3. 모멘텀 품질 — 다중 타임프레임 ROC 일관성
+          4. 변동성 상태 — BB 밴드폭 + ATR 백분위
+          5. 마이크로스트럭처 — OBV 추세
+
         Returns (regime, confidence, reason)
         """
         close = df["close"]
         high  = df["high"]  if "high"  in df.columns else close
         low   = df["low"]   if "low"   in df.columns else close
 
-        # EMA
+        # ── EMA ──────────────────────────────────────────────────────────
         ema21_s  = ema(close, 21)
         ema50_s  = ema(close, 50)
         ema200_s = ema(close, 200)
@@ -226,14 +234,18 @@ class RegimeRouter:
         c50  = float(ema50_s.iloc[-1])
         c200 = float(ema200_s.iloc[-1])
 
-        # ADX
+        # ── ADX ──────────────────────────────────────────────────────────
         try:
             adx_df  = calc_adx(high, low, close, 14)
             adx_val = float(adx_df["adx"].iloc[-1])
+            plus_di = float(adx_df["plus_di"].iloc[-1])
+            minus_di = float(adx_df["minus_di"].iloc[-1])
         except Exception:
             adx_val = 20.0
+            plus_di = 15.0
+            minus_di = 15.0
 
-        # ATR 백분위 (변동성 레짐 판단)
+        # ── ATR 백분위 (변동성 레짐) ─────────────────────────────────────
         try:
             vol_pct_s = volatility_percentile(close, short=20, long=100)
             vol_arr   = vol_pct_s.dropna()
@@ -241,52 +253,92 @@ class RegimeRouter:
         except Exception:
             vol_pct = 0.5
 
+        # ── 모멘텀 품질 (ROC 다중 타임프레임 일관성) ──────────────────────
+        # 5봉 ROC (단기) + 20봉 ROC (중기)의 방향 일관성 체크
+        momentum_quality = 0.5  # 기본값
+        if len(close) >= 25:
+            roc5 = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1.0) if float(close.iloc[-6]) > 0 else 0.0
+            roc20 = (float(close.iloc[-1]) / float(close.iloc[-21]) - 1.0) if float(close.iloc[-21]) > 0 else 0.0
+            # 두 ROC가 같은 방향이면 모멘텀 품질 높음
+            if roc5 > 0.001 and roc20 > 0.001:
+                momentum_quality = min(1.0, 0.5 + abs(roc5) * 20 + abs(roc20) * 10)
+            elif roc5 < -0.001 and roc20 < -0.001:
+                momentum_quality = min(1.0, 0.5 + abs(roc5) * 20 + abs(roc20) * 10)
+            elif abs(roc5) < 0.001 and abs(roc20) < 0.001:
+                momentum_quality = 0.1  # 완전 정체
+            else:
+                momentum_quality = 0.2  # 방향 불일치
+
+        # ── BB 밴드폭 (수축/확장 감지) ───────────────────────────────────
+        bb_compression = False
+        try:
+            bb = bollinger_bands(close, 20, 2.0)
+            bb_width = (bb["upper"] - bb["lower"]) / bb["mid"]
+            bb_width_current = float(bb_width.iloc[-1])
+            # 최근 100봉 대비 현재 밴드폭 백분위
+            bb_pctl = float((bb_width.tail(100) < bb_width_current).mean())
+            bb_compression = (bb_pctl < self._s.REGIME_ROUTER_BB_COMPRESSION_PCT)
+        except Exception:
+            bb_pctl = 0.5
+
         price = float(close.iloc[-1])
 
         adx_strong   = self._s.REGIME_ROUTER_ADX_STRONG
         adx_moderate = self._s.REGIME_ROUTER_ADX_MODERATE
         atr_volatile = self._s.REGIME_ROUTER_ATR_VOLATILE_PCT
 
-        # 1) 변동성 우선 체크
+        # ── 1) 극단 변동성 우선 체크 ─────────────────────────────────────
         if vol_pct > atr_volatile:
             return DynamicRegime.VOLATILE, min(1.0, vol_pct), \
                    f"vol_pct={vol_pct:.2f}>threshold={atr_volatile}"
+
+        # ── 2) BB 수축 (pre-breakout) → SIDEWAYS (진입 대기) ─────────────
+        # 변동성 수축 중에는 추세가 확정되지 않음 → 무분별한 진입 방지
+        if bb_compression and adx_val < adx_moderate:
+            return DynamicRegime.SIDEWAYS, 0.4, \
+                   f"BB_compression(pctl={bb_pctl:.2f}) + low_ADX={adx_val:.1f}"
 
         # EMA 정렬 여부
         ema_bull = (c21 > c50 > c200)
         ema_bear = (c21 < c50 < c200)
 
-        # EMA 갭 → confidence 계산
+        # EMA 갭 → confidence 계산 (모멘텀 품질 반영)
         ema_gap = abs(c21 - c50) / (price + 1e-9)
-        confidence = min(1.0, 0.5 + ema_gap * 100)
+        base_confidence = min(1.0, 0.5 + ema_gap * 100)
+        # 모멘텀 품질로 confidence 조정
+        confidence = base_confidence * (0.5 + 0.5 * momentum_quality)
 
-        # 2) 상승 정렬
+        # DI 방향성 일치 여부 (추세 확인 강화)
+        di_bull = plus_di > minus_di
+        di_bear = minus_di > plus_di
+
+        # ── 3) 상승 정렬 ─────────────────────────────────────────────────
         if ema_bull:
-            if adx_val > adx_strong:
+            if adx_val > adx_strong and di_bull and momentum_quality > 0.4:
                 return DynamicRegime.STRONG_BULL, confidence, \
-                       f"EMA↑ ADX={adx_val:.1f}>{adx_strong}"
-            elif adx_val >= adx_moderate:
+                       f"EMA↑ ADX={adx_val:.1f}>{adx_strong} DI✓ mom={momentum_quality:.2f}"
+            elif adx_val >= adx_moderate and di_bull:
                 return DynamicRegime.BULL, confidence * 0.85, \
-                       f"EMA↑ ADX={adx_val:.1f}>={adx_moderate}"
+                       f"EMA↑ ADX={adx_val:.1f}>={adx_moderate} DI✓ mom={momentum_quality:.2f}"
             else:
-                # EMA 정렬됐지만 모멘텀 없음 → SIDEWAYS
-                return DynamicRegime.SIDEWAYS, 0.6, \
-                       f"EMA↑ no_momentum ADX={adx_val:.1f}<{adx_moderate}"
+                return DynamicRegime.SIDEWAYS, 0.5, \
+                       f"EMA↑ weak(ADX={adx_val:.1f} DI={'+' if di_bull else '-'} mom={momentum_quality:.2f})"
 
-        # 3) 하락 정렬
+        # ── 4) 하락 정렬 ─────────────────────────────────────────────────
         if ema_bear:
-            if adx_val > adx_strong:
+            if adx_val > adx_strong and di_bear and momentum_quality > 0.4:
                 return DynamicRegime.STRONG_BEAR, confidence, \
-                       f"EMA↓ ADX={adx_val:.1f}>{adx_strong}"
-            elif adx_val >= adx_moderate:
+                       f"EMA↓ ADX={adx_val:.1f}>{adx_strong} DI✓ mom={momentum_quality:.2f}"
+            elif adx_val >= adx_moderate and di_bear:
                 return DynamicRegime.BEAR, confidence * 0.85, \
-                       f"EMA↓ ADX={adx_val:.1f}>={adx_moderate}"
+                       f"EMA↓ ADX={adx_val:.1f}>={adx_moderate} DI✓ mom={momentum_quality:.2f}"
             else:
-                return DynamicRegime.SIDEWAYS, 0.6, \
-                       f"EMA↓ no_momentum ADX={adx_val:.1f}<{adx_moderate}"
+                return DynamicRegime.SIDEWAYS, 0.5, \
+                       f"EMA↓ weak(ADX={adx_val:.1f} DI={'-' if di_bear else '+'} mom={momentum_quality:.2f})"
 
-        # 4) 혼합 EMA → SIDEWAYS
-        return DynamicRegime.SIDEWAYS, 0.5, f"EMA_mixed ADX={adx_val:.1f}"
+        # ── 5) 혼합 EMA → SIDEWAYS ──────────────────────────────────────
+        return DynamicRegime.SIDEWAYS, 0.4, \
+               f"EMA_mixed ADX={adx_val:.1f} mom={momentum_quality:.2f}"
 
     def _update_confirmation(
         self,

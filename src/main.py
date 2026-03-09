@@ -34,6 +34,7 @@ from src.execution.order_manager import OrderManager
 from src.execution.state_machine import StateMachine
 from src.logger import get_logger
 from src.reporting.daily_briefing import DailyBriefing
+from src.risk.correlation import CorrelationGuard
 from src.risk.engine import RiskEngine
 from src.risk.guards import GuardAction, RiskGuards
 from src.risk.profit_protector import ProfitProtector
@@ -73,6 +74,7 @@ class TradingBot:
         self._regime_router  = RegimeRouter(settings)
         self._risk_engine = RiskEngine(settings)
         self._guards = RiskGuards(settings)
+        self._correlation = CorrelationGuard(settings.MAX_TOTAL_EXPOSURE_PCT)
         self._state_machine = StateMachine(settings)
         self._order_mgr = OrderManager(self._client, settings, self._slack)
         self._briefing = DailyBriefing(
@@ -305,7 +307,17 @@ class TradingBot:
         if combined.direction == 0:
             return
 
-        if not self._state_machine.can_enter(symbol):
+        # ── 방향 인식 쿨다운 체크 ────────────────────────────────────────
+        if not self._state_machine.can_enter(symbol, direction=combined.direction):
+            return
+
+        # ── 일일 거래 횟수 제한 ──────────────────────────────────────────
+        daily_trades = self._db.get_trades_count_today(symbol=symbol)
+        if daily_trades >= settings.MAX_TRADES_PER_DAY_PER_SYMBOL:
+            log.debug(
+                "Daily trade cap reached for %s (%d/%d)",
+                symbol, daily_trades, settings.MAX_TRADES_PER_DAY_PER_SYMBOL,
+            )
             return
 
         # Get symbol info for position sizing
@@ -315,6 +327,9 @@ class TradingBot:
 
         # Get consecutive losses for risk dampening
         consec = self._db.get_consecutive_losses(symbol)
+
+        # ── Rolling win stats for adaptive Kelly ─────────────────────────
+        win_stats = self._db.get_rolling_win_stats(window=50)
 
         # Calculate risk parameters
         is_bear_mode = (self._macro_mode == "BEAR_SIDEWAYS")
@@ -334,11 +349,29 @@ class TradingBot:
             current_positions=self._state_machine.open_count(),
             trade_mode=trade_mode_str,
             bear_mode=is_bear_mode,
+            win_stats=win_stats,
         )
 
         if not risk_params.risk_ok:
             log.debug("Risk check failed for %s: %s", symbol, risk_params.reason)
             return
+
+        # ── Correlation Guard: 상관 자산 과다 노출 방지 ──────────────────
+        corr_allowed, corr_scale = self._correlation.check_entry(
+            symbol=symbol,
+            direction=combined.direction,
+            notional=risk_params.position_size_usdt,
+            positions=self._state_machine.all_positions(),
+            equity=equity,
+        )
+        if not corr_allowed:
+            log.debug("Correlation guard blocked %s entry", symbol)
+            return
+        if corr_scale < 1.0:
+            risk_params.qty_base *= corr_scale
+            risk_params.position_size_usdt *= corr_scale
+            risk_params.margin_usdt *= corr_scale
+            risk_params.max_loss_usdt *= corr_scale
 
         # ── Auto mode: 레짐 라우터 리스크 스케일 적용 ────────────────────────
         # direction_bias 필터 (이미 _collect_and_signal_auto에서 1차 필터링하지만
@@ -1088,10 +1121,11 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 
-    # Bot cycle: 스캘핑/트렌드/auto는 LTF 타임프레임, 스윙은 SIGNAL_TIMEFRAME 기준
-    # auto 모드: collect_for_scalp(3m LTF) 사용 → 3분 사이클
+    # Bot cycle: 5분 사이클 (3분→5분 상향 — 오버트레이딩 방지, 신호 품질 향상)
+    # 3분 사이클은 하루 480회 신호 평가 → 매매 빈도 과다
+    # 5분 사이클은 하루 288회 → 적절한 신호 간격 확보
     if settings.STRATEGY_MODE in ("scalp", "trend", "auto"):
-        cycle_interval = int(settings.SCALP_PURE_LTF_TIMEFRAME)  # 3분 기본
+        cycle_interval = 5  # 5분 고정 (기존 3분에서 상향)
     else:
         cycle_interval = int(settings.SIGNAL_TIMEFRAME) if int(settings.SIGNAL_TIMEFRAME) <= 60 else 5
     log.info(

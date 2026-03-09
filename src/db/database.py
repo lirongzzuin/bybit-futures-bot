@@ -245,16 +245,46 @@ class Database:
             row = conn.execute(sql, params).fetchone()
             return float(row[0] or 0)
 
-    def get_trades_count_today(self) -> int:
+    def get_trades_count_today(self, symbol: Optional[str] = None) -> int:
         # KST 기준 오늘 자정의 Unix timestamp
         today_start = datetime.now(tz=_KST).replace(
             hour=0, minute=0, second=0, microsecond=0
         ).timestamp()
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM trades WHERE exit_ts >= ?", (today_start,)
-            ).fetchone()
+            if symbol:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE entry_ts >= ? AND symbol=?",
+                    (today_start, symbol),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE entry_ts >= ?", (today_start,)
+                ).fetchone()
             return int(row[0] or 0)
+
+    def get_rolling_win_stats(self, window: int = 50) -> Optional[Dict]:
+        """최근 N개 거래의 승률/평균수익/평균손실 — Kelly 산출용."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT pnl FROM trades WHERE exit_ts IS NOT NULL "
+                "ORDER BY exit_ts DESC LIMIT ?",
+                (window,),
+            ).fetchall()
+            if len(rows) < 10:  # 최소 10개는 있어야 의미 있음
+                return None
+            pnls = [float(r[0]) for r in rows]
+            wins = [p for p in pnls if p > 0]
+            losses = [abs(p) for p in pnls if p < 0]
+            n = len(pnls)
+            wr = len(wins) / n if n > 0 else 0.5
+            avg_win = sum(wins) / len(wins) if wins else 0.0
+            avg_loss = sum(losses) / len(losses) if losses else 0.0
+            return {
+                "n_trades": n,
+                "win_rate": wr,
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+            }
 
     def get_win_rate(self, days: int = 30) -> float:
         """Win rate of closed trades over the last N days."""
