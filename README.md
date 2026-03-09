@@ -17,11 +17,11 @@ Fly.io 클라우드에 컨테이너로 배포되어 24/7 무중단 운영 중이
 | 항목 | 내용 |
 |------|------|
 | **구현 언어** | Python 3.11 |
-| **전략 유형** | 스윙(15분봉 멀티 시그널) + 스캘핑(3분봉 EMA Ribbon) + **추세EMA(Phase-locked 방향 잠금)** — 설정으로 전환 |
+| **전략 유형** | 스윙 + 스캘핑 + **추세EMA(Phase-locked)** + **auto(Dynamic Regime Router)** — 설정으로 전환 |
 | **매크로 필터** | BTC 일봉 EMA200 기반 BULL/BEAR 자동 판단 → 거래 심볼 자동 전환 |
-| **리스크 관리** | 동적 레버리지 역산, 다층 손실 가드, 청산 버퍼 검증, 수수료 손익분기 체크 |
+| **리스크 관리** | 동적 레버리지 역산, 다층 손실 가드, 청산 버퍼 검증, **Min Stop Floor**, 수수료 손익분기 체크 |
 | **수수료 최적화** | 신호 강도별 PostOnly(Maker 0.020%) / 시장가(Taker 0.055%) 자동 선택 |
-| **테스트** | pytest 314개 테스트 케이스 전체 통과 |
+| **테스트** | pytest **355개** 테스트 케이스 전체 통과 |
 | **배포** | Docker → Fly.io (nrt/Tokyo, 월 ≈ $2.17) + GitHub Actions CI/CD 자동 배포 |
 | **모니터링** | Slack Webhook + Socket Mode 명령어 봇 |
 
@@ -104,21 +104,22 @@ Fly.io 클라우드에 컨테이너로 배포되어 24/7 무중단 운영 중이
 STRATEGY_MODE=trend   # ★ 현재 배포 — Phase-locked 추세 EMA 전략 (3분봉)
 STRATEGY_MODE=scalp   # 3분봉 스캘핑 전략 (EMA Ribbon + VWAP + RSI)
 STRATEGY_MODE=swing   # 15분봉 스윙/추세추종 전략 (ICT + 15가지 지표)
+STRATEGY_MODE=auto    # Dynamic Regime Router — 장세별 자동 전략 선택
 ```
 
-| 항목 | trend 모드 | scalp 모드 | swing 모드 |
-|------|-----------|-----------|-----------|
-| **핵심 철학** | 장세 판단 → 방향 잠금 | 모멘텀 스캘핑 | ICT + 레짐 기반 |
-| **데이터** | 3m LTF + 15m HTF | 3m LTF + 15m HTF | 15m 메인 + 1D 레짐 |
-| **신호 생성** | TrendEMAStrategy (5점 스코어링) | ScalpingStrategy (9점 스코어링) | 15가지 지표 + 레짐 가중 합산 |
-| **방향 잠금** | BULL→LONG만 / BEAR→SHORT만 | 양방향 | 양방향 |
-| **사이클 주기** | 3분 | 3분 | 15분 |
-| **트레이드 모드** | 항상 `PURE_SCALP` | 항상 `PURE_SCALP` | `SCALP` / `TREND_RIDE` 자동 선택 |
-| **Stop** | 1.0×ATR | 1.0×ATR | 1.0–2.0×ATR |
-| **TP1 / TP2** | 1.5× / 3.0×ATR | 1.5× / 3.0×ATR | 1.5–3.0× / 3.0–6.0×ATR |
-| **최대 보유** | 20봉 (60분) | 20봉 (60분) | 12–120봉 |
+| 항목 | trend 모드 | scalp 모드 | swing 모드 | auto 모드 |
+|------|-----------|-----------|-----------|-----------|
+| **핵심 철학** | 장세 판단 → 방향 잠금 | 모멘텀 스캘핑 | ICT + 레짐 기반 | 장세 자동 감지 → 최적 전략 선택 |
+| **데이터** | 3m LTF + 15m HTF | 3m LTF + 15m HTF | 15m 메인 + 1D 레짐 | 15m→60m 리샘플 |
+| **신호 생성** | TrendEMAStrategy (5점) | ScalpingStrategy (9점) | 15가지 지표 합산 | RegimeRouter 자동 |
+| **방향 잠금** | BULL→LONG / BEAR→SHORT | 양방향 | 양방향 | 장세별 자동 |
+| **사이클 주기** | 3분 | 3분 | 15분 | 3분 |
+| **트레이드 모드** | `PURE_SCALP` | `PURE_SCALP` | `SCALP`/`TREND_RIDE` | 장세별 자동 |
+| **Stop** | 1.2×ATR (min 0.4%) | 1.2×ATR (min 0.4%) | 1.5–2.5×ATR | 장세별 자동 |
+| **TP1 / TP2** | 1.5× / 3.0×ATR | 1.5× / 3.0×ATR | 1.5–3.0× / 3.0–6.0×ATR | 장세별 자동 |
+| **최대 보유** | 20봉 (60분) | 20봉 (60분) | 12–120봉 | 장세별 자동 |
 
-세 전략 모두 동일한 **리스크 가드, 수수료 최적화, Slack 알림, DB 기록, 청산 로직**을 공유합니다.
+네 전략 모두 동일한 **리스크 가드, 수수료 최적화, Slack 알림, DB 기록, 청산 로직**을 공유합니다.
 
 ---
 
@@ -136,8 +137,8 @@ STRATEGY_MODE=swing   # 15분봉 스윙/추세추종 전략 (ICT + 15가지 지�
 
 | 장세 | 조건 | 허용 방향 |
 |------|------|---------|
-| **BULL_TREND** | HTF: EMA21 > EMA50 > EMA200 AND ADX ≥ 18 | **LONG만** 허용 |
-| **BEAR_TREND** | HTF: EMA21 < EMA50 < EMA200 AND ADX ≥ 18 | **SHORT만** 허용 |
+| **BULL_TREND** | HTF: EMA21 > EMA50 > EMA200 AND ADX ≥ 22 AND +DI > -DI | **LONG만** 허용 |
+| **BEAR_TREND** | HTF: EMA21 < EMA50 < EMA200 AND ADX ≥ 22 AND -DI > +DI | **SHORT만** 허용 |
 | **SIDEWAYS** | 위 조건 미충족 | 볼린저 밴드 극단값에서 양방향 (높은 임계치) |
 
 ### 진입 스코어링 (5점 만점, 최소 4점 필요)
@@ -148,8 +149,9 @@ STRATEGY_MODE=swing   # 15분봉 스윙/추세추종 전략 (ICT + 15가지 지�
 |------|------|------|
 | EMA9/EMA21 정렬 (Phase 방향 일치) | +2 | 핵심 조건 — LTF 모멘텀 확인 |
 | 가격이 EMA21 ±2.0×ATR 존 내 | +1 | 풀백/반등 진입 구간 |
-| RSI가 방향에 맞는 범위 (38-63) | +1 | 과매수/과매도 회피 |
+| RSI가 방향에 맞는 범위 (롱 40-65 / 숏 40-60) | +1 | 과매수/과매도 회피 |
 | 거래량 ≥ 20봉 평균 × 1.1 | +1 | 참여도 확인 |
+| 양봉 OR 핀바(하단윅>0.35×ATR) | +1 | 방향 확인 + 반전 패턴 |
 | \|funding rate\| > 0.1% | -1 | 한쪽 쏠림 위험 |
 | 스프레드 > 0.2% | -1 | 체결 비용 과다 |
 
@@ -198,12 +200,14 @@ BEAR_TREND에서 LONG  신호: 0건 (50회 반복 테스트)
 | HTF EMA9 > EMA21 | +2 | HTF 단기 상승 추세 |
 | HTF 가격 > VWAP | +1 | 세션 내 매수 우위 |
 | LTF EMA9 > EMA21 | +2 | LTF 단기 상승 추세 확인 |
-| 가격이 EMA21 ± ATR 존 내 | +1 | 풀백 진입 구간 |
-| RSI 40–65 | +1 | 모멘텀 형성 중, 과매수 아님 |
+| 가격이 EMA21 ± 1.5×ATR 존 내 | +1 | 풀백 진입 구간 (깊은 풀백 포착) |
+| RSI 45–65 (롱) / 42–55 (숏) | +1 | 모멘텀 형성 중, 과매수 아님 |
 | 볼륨 ≥ 20봉 평균 × 1.2 | +1 | 참여도 확인 |
-| 마지막 봉 양봉 | +1 | 즉각적 방향성 확인 |
+| 양봉 OR 핀바(하단윅>0.35×ATR) | +1 | 방향 확인 + 반전 패턴 |
 | \|펀딩비\| > 0.1% | -1 | 한쪽 쏠림 위험 |
 | 스프레드 > 0.2% | -1 | 체결 비용 과다 |
+
+**3단계 하드 필터**: HTF EMA9/21 → LTF EMA50 → HTF EMA50 구조 확인 (모두 통과 필수)
 
 숏 진입: 롱의 정반대 조건
 
@@ -211,12 +215,12 @@ BEAR_TREND에서 LONG  신호: 0건 (50회 반복 테스트)
 
 | score | strength | 레버리지 티어 | 주문 방식 |
 |-------|----------|-------------|---------|
-| < 5 | — | 진입 없음 | — |
-| 5 | 0.60 | 기본 (2-3×) | PostOnly |
-| 6 | 0.69 | ≥0.65 (4-5×) | PostOnly |
-| 7 | 0.77 | ≥0.75 (8-10×) | PostOnly |
-| 8 | 0.83 | ≥0.80 (15-18×) | PostOnly |
-| 9 | 0.91 | ≥0.85 (20×) | **시장가** |
+| < 8 | — | 진입 없음 | — |
+| 8 | 0.83 | ≥0.80 (10-12×) | PostOnly |
+| 9 | 0.91 | ≥0.85 (15-20×) | **시장가** |
+
+> **min_score 5→8 강화 이유**: 낮은 점수 진입은 노이즈 거래 비중이 높아 승률을 떨어뜨림.
+> score 8 이상만 허용하면 8-10× 이상의 레버리지 티어만 사용 → 고품질 거래만 실행.
 
 ---
 
@@ -265,6 +269,30 @@ BEAR_TREND에서 LONG  신호: 0건 (50회 반복 테스트)
 
 ---
 
+## 5-1. Dynamic Regime Router — `STRATEGY_MODE=auto`
+
+`src/strategy/regime_router.py` — 매 사이클 15m봉→60m 리샘플 후 장세를 감지하여 자동으로 최적 전략을 선택합니다.
+
+### 7개 장세 → 전략 자동 매핑
+
+| 장세 | 감지 조건 | 전략 | 방향 | 리스크 | 레버리지캡 |
+|------|----------|------|------|--------|-----------|
+| **STRONG_BULL** | EMA↑ + ADX>27 | trend | LONG only | 100% | 20× |
+| **BULL** | EMA↑ + ADX≥18 | trend | LONG only | 90% | 15× |
+| **SIDEWAYS** | 혼합 EMA | scalp | 양방향 | 80% | 10× |
+| **BEAR** | EMA↓ + ADX≥18 | trend | SHORT only | 90% | 15× |
+| **STRONG_BEAR** | EMA↓ + ADX>27 | trend | SHORT only | 100% | 20× |
+| **VOLATILE** | ATR pct>82% | scalp | 양방향 | 50% | 8× |
+| **TRANSITION** | 전환 확정 중 | — | skip | — | — |
+
+### 디바운스 로직
+
+- 같은 그룹 전환 (BULL↔STRONG_BULL): 즉시 확정
+- 다른 그룹 전환 (BULL→BEAR 등): **3회 연속** 확인 후 확정
+- macro_bear=True 시: STRONG_BULL→BEAR, BULL→SIDEWAYS 오버라이드
+
+---
+
 ## 6. 매크로 레짐 — BULL / BEAR 자동 전환
 
 `src/strategy/macro_regime.py` — BTC 일봉(1440분봉) 기반으로 시장 환경을 판단합니다.
@@ -306,11 +334,15 @@ BEAR_TREND에서 LONG  신호: 0건 (50회 반복 테스트)
 
 | 시그널 강도 | stop_atr_scale | trade_risk_pct | 목표 레버리지 |
 |------------|----------------|----------------|--------------|
-| ≥ 0.85 | 0.35 (타이트) | min(16%, risk×8) | ~20× (캡) |
-| ≥ 0.80 | 0.50 | min(12%, risk×6) | ~15-18× |
-| ≥ 0.75 | 0.65 | min(9%, risk×4.5) | ~8-10× |
-| ≥ 0.65 | 0.80 | min(6%, risk×3) | ~4-5× |
+| ≥ 0.85 | 0.65 | min(16%, risk×8) | ~15-20× (캡) |
+| ≥ 0.80 | 0.75 | min(12%, risk×6) | ~10-12× |
+| ≥ 0.75 | 0.85 | min(9%, risk×4.5) | ~7-9× |
+| ≥ 0.65 | 0.92 | min(6%, risk×3) | ~4-5× |
 | 기본 | 1.00 | min(4%, risk×2) | ~2-3× |
+
+> **stop_atr_scale 상향 이유 (0.35→0.65 등)**: 이전 설정에서 ETH의 3분봉 ATR(0.19%)에
+> 0.35를 곱하면 손절가 $3.78 → 즉시 노이즈에 의한 손절 발동. 스케일을 넓혀 최소 의미있는
+> 가격 움직임만 손절로 처리.
 
 낙폭 > 15%: 에스컬레이션 자동 비활성화 (기본 risk만 사용)
 
@@ -355,11 +387,15 @@ BEAR_TREND에서 LONG  신호: 0건 (50회 반복 테스트)
 
 | 항목 | PURE_SCALP | SCALP | TREND_RIDE |
 |------|-----------|-------|-----------|
-| SL | 1.0×ATR | 1.2×ATR | 2.0×ATR |
+| SL | 1.2×ATR | 1.5×ATR | 2.5×ATR |
+| **Min Stop Floor** | **0.4%** | **0.7%** | **1.2%** |
 | TP1 | 1.5×ATR | 2.5×ATR | 3.0×ATR |
 | TP2 | 3.0×ATR | 5.5×ATR | 6.0×ATR |
 | 부분청산 비율 | 50% | 60% | 40% |
 | 최대 보유 봉 수 | 20봉 (60분) | 12봉 | 120봉 |
+
+> **Min Stop Floor**: ATR이 극히 낮은 시장에서 계산상 손절가가 0.19% 등 노이즈 범위 내로
+> 설정되는 것을 방지. Floor 적용 시 TP도 비례 확대하여 R:R 비율 유지.
 
 ---
 
@@ -490,6 +526,7 @@ bybit-futures-bot/
 │   │   ├── regime.py            # 시장 국면 분류 (ADX + EMA + Hurst)
 │   │   ├── macro_regime.py      # 매크로 레짐 (BTC 일봉 EMA200 기반)
 │   │   ├── signals.py           # 15가지 시그널 생성기
+│   │   ├── regime_router.py      # ★ Dynamic Regime Router (auto 모드)
 │   │   ├── combiner.py          # 레짐별 가중 합산 → (direction, strength)
 │   │   ├── filters.py           # 품질 필터 (ER, Hurst, Min ATR)
 │   │   ├── ict.py               # ICT 분석 (BOS, CHoCH, FVG, Liquidity)
@@ -515,7 +552,10 @@ bybit-futures-bot/
 │       ├── synthetic.py         # 합성 BTC 데이터 생성기 (GBM + GARCH)
 │       └── report.py            # HTML 보고서 + Quality Gate 판정
 │
-├── tests/                       # pytest 314개 테스트 케이스 (전체 통과)
+├── src/reporting/
+│   └── daily_briefing.py        # 09:00/21:00 KST 정기 브리핑 (장세 판단 + 운용 전략)
+│
+├── tests/                       # pytest 355개 테스트 케이스 (전체 통과)
 │   ├── test_trend_ema.py        # ★ 추세EMA 전략 33개 테스트
 │   ├── test_scalping_strategy.py  # 스캘핑 전략 52개 테스트
 │   ├── test_risk.py
@@ -557,7 +597,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # .env 파일에서 BYBIT_API_KEY, BYBIT_API_SECRET 등 입력
 
-# 전체 테스트 실행 (314개)
+# 전체 테스트 실행 (355개)
 python3 -m pytest tests/ -v
 
 # Dry-run 모드 (주문 없음, API 불필요)
@@ -632,17 +672,17 @@ fly logs --app bybit-futures-bot --no-tail
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `STRATEGY_MODE` | `swing` | `trend` / `scalp` / `swing` 전략 선택 |
+| `STRATEGY_MODE` | `swing` | `trend` / `scalp` / `swing` / `auto` 전략 선택 |
 
 ### 추세EMA 전략 파라미터 (`STRATEGY_MODE=trend`)
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `TREND_EMA_ADX_THRESHOLD` | `18.0` | HTF ADX ≥ 이 값이면 추세 국면 판단 |
+| `TREND_EMA_ADX_THRESHOLD` | `22.0` | HTF ADX ≥ 이 값이면 추세 국면 판단 (18→22) |
 | `TREND_EMA_MIN_SCORE` | `4` | 추세 진입 최소 점수 (5점 만점) |
 | `TREND_EMA_RANGE_MIN_SCORE` | `4` | 횡보 진입 최소 점수 (더 보수적) |
-| `TREND_EMA_RSI_BULL_MIN/MAX` | `38.0 / 63.0` | BULL_TREND 롱 RSI 허용 구간 |
-| `TREND_EMA_RSI_BEAR_MIN/MAX` | `37.0 / 63.0` | BEAR_TREND 숏 RSI 허용 구간 |
+| `TREND_EMA_RSI_BULL_MIN/MAX` | `40.0 / 65.0` | BULL_TREND 롱 RSI 허용 구간 (38-63→40-65) |
+| `TREND_EMA_RSI_BEAR_MIN/MAX` | `40.0 / 60.0` | BEAR_TREND 숏 RSI 허용 구간 (37-63→40-60) |
 | `TREND_EMA_RSI_RANGE_LONG_MAX` | `35.0` | SIDEWAYS 롱: RSI 35 이하 (강한 과매도) |
 | `TREND_EMA_RSI_RANGE_SHORT_MIN` | `65.0` | SIDEWAYS 숏: RSI 65 이상 (강한 과매수) |
 | `TREND_EMA_ZONE_ATR_MULT` | `2.0` | EMA21 ±2.0×ATR = 풀백/반등 진입 존 |
@@ -654,10 +694,10 @@ fly logs --app bybit-futures-bot --no-tail
 |----------|--------|------|
 | `SCALP_PURE_LTF_TIMEFRAME` | `3` | LTF 타임프레임 (분) |
 | `SCALP_PURE_HTF_TIMEFRAME` | `15` | HTF 타임프레임 (분) |
-| `SCALP_PURE_RSI_LONG_MIN/MAX` | `40.0 / 65.0` | 롱 RSI 허용 구간 |
-| `SCALP_PURE_RSI_SHORT_MIN/MAX` | `35.0 / 60.0` | 숏 RSI 허용 구간 |
-| `SCALP_PURE_ENTRY_MIN_SCORE` | `5` | 최소 진입 점수 |
-| `SCALP_PURE_STOP_ATR` | `1.0` | 손절 ATR 배수 |
+| `SCALP_PURE_RSI_LONG_MIN/MAX` | `45.0 / 65.0` | 롱 RSI 허용 구간 (40-65→45-65) |
+| `SCALP_PURE_RSI_SHORT_MIN/MAX` | `42.0 / 55.0` | 숏 RSI 허용 구간 (35-60→42-55) |
+| `SCALP_PURE_ENTRY_MIN_SCORE` | `8` | 최소 진입 점수 (5→8, 고품질 거래만) |
+| `SCALP_PURE_STOP_ATR` | `1.2` | 손절 ATR 배수 (1.0→1.2) |
 | `SCALP_PURE_TP1_ATR` | `1.5` | 1차 익절 ATR 배수 |
 | `SCALP_PURE_TP2_ATR` | `3.0` | 2차 익절 ATR 배수 |
 
@@ -672,7 +712,15 @@ fly logs --app bybit-futures-bot --no-tail
 | `MAX_DRAWDOWN_PCT` | `0.30` | 최대 낙폭 한도 |
 | `MAX_LEVERAGE_CAP` | `20` | BULL 모드 최대 레버리지 |
 | `BEAR_MAX_LEVERAGE_CAP` | `20` | BEAR 모드 최대 레버리지 |
-| `MAX_CONCURRENT_POSITIONS` | `3` | 동시 최대 포지션 수 |
+| `MAX_CONCURRENT_POSITIONS` | `2` | 동시 최대 포지션 수 |
+
+### 손절 바닥값 (Min Stop Floor)
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `MIN_STOP_PCT_PURE_SCALP` | `0.004` | PURE_SCALP 모드 최소 손절폭 (0.4%) |
+| `MIN_STOP_PCT_SCALP` | `0.007` | SCALP 모드 최소 손절폭 (0.7%) |
+| `MIN_STOP_PCT_TREND_RIDE` | `0.012` | TREND_RIDE 모드 최소 손절폭 (1.2%) |
 
 ---
 
@@ -688,7 +736,7 @@ fly logs --app bybit-futures-bot --no-tail
 | **로깅** | `structlog 24.4` | 구조화 로그 |
 | **알림** | `slack-bolt 1.21` (Socket Mode) | 실시간 양방향 Slack 통신 |
 | **HTTP** | `httpx 0.27`, `aiohttp 3.10` | 비동기 HTTP |
-| **테스트** | `pytest 8.3` | 314개 테스트 케이스 전체 통과 |
+| **테스트** | `pytest 8.3` | 355개 테스트 케이스 전체 통과 |
 | **배포** | Fly.io + Docker (`python:3.11-slim`) | 컨테이너 기반 무중단 배포 |
 | **CI/CD** | GitHub Actions | main 브랜치 push → 자동 fly.io 배포 |
 
@@ -739,6 +787,24 @@ stale 가격으로 주문 → 51초 대기 후 결국 시장가 전환.
 "거래당 최대 손실 = 자본의 2%"를 **목표로 고정**하고,
 손절 거리에서 역산하여 레버리지를 결정합니다.
 결과적으로 변동성이 클수록 레버리지가 낮아지고, 잔잔한 시장에서는 높아집니다.
+
+### Min Stop Floor를 도입한 이유
+
+ETH의 3분봉 ATR이 0.19%일 때 stop_atr_scale=0.35를 곱하면 손절가가 진입가 대비 0.07% ($3.78)
+→ 일반적인 틱 노이즈에도 즉시 손절 발동. **Min Floor**(PURE_SCALP 0.4%, SCALP 0.7%, TREND_RIDE 1.2%)를
+도입하여 최소 의미있는 가격 움직임에서만 손절이 발동되도록 보장.
+Floor 적용 시 TP도 `tp_scale = floor / raw_stop` 비율로 비례 확대 → R:R 유지.
+
+### DI 방향성 확인을 추가한 이유 (3중 필터)
+
+ADX만으로는 추세 "강도"만 판단 가능 — **방향**은 알 수 없음.
+ADX=25이지만 -DI>+DI인 경우 하락 추세 → 여기서 LONG 진입하면 역추세.
+DI+/DI- 방향 확인을 ADX 조건에 추가하여 **추세 강도 + 방향** 동시 검증 (3중 필터: EMA + ADX + DI).
+
+### 핀바 패턴을 캔들 스코어에 반영한 이유
+
+기존 "마지막 봉 양봉" 조건은 방향만 확인. 핀바(하단 윅 > 0.35×ATR)는 **실제 매수세가 존재**한다는
+더 강력한 반전 신호. "양봉 OR 핀바" 조건으로 변경하여 음봉이어도 아래꼬리가 길면 반등 포착 가능.
 
 ---
 
