@@ -128,23 +128,23 @@ class RiskEngine:
         dd_escalation_allowed = drawdown_pct <= 0.15
 
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
-        # 보수적 리스크 관리: 1회 손실 = 자본의 1-3% 이내
-        # 고레버리지 과거 손실 원인 → 레버리지 4-8× 범위로 제한
+        # 공격적 복리 성장: 검증된 전략 + 추세 전용 → 강신호에 집중 베팅
+        # MDD 22% 이내 유지, CAGR 극대화 (경제적 자유 목표)
         if signal_strength >= 0.85 and dd_escalation_allowed:
-            stop_atr_scale = 0.75           # 넉넉한 스탑 → 노이즈 터짐 방지
-            trade_risk_pct = min(0.06, target_risk * 3.0)   # 목표 레버리지: ~6-8×
+            stop_atr_scale = 0.68           # 넉넉한 스탑 → 노이즈 방지
+            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~12-16×
         elif signal_strength >= 0.80 and dd_escalation_allowed:
-            stop_atr_scale = 0.80
-            trade_risk_pct = min(0.05, target_risk * 2.5)   # 목표 레버리지: ~5-6×
+            stop_atr_scale = 0.73
+            trade_risk_pct = min(0.10, target_risk * 5.0)   # 목표 레버리지: ~10-13×
         elif signal_strength >= 0.75 and dd_escalation_allowed:
-            stop_atr_scale = 0.85
-            trade_risk_pct = min(0.04, target_risk * 2.0)   # 목표 레버리지: ~4-5×
+            stop_atr_scale = 0.80
+            trade_risk_pct = min(0.07, target_risk * 3.5)   # 목표 레버리지: ~7-9×
         elif signal_strength >= 0.65:
-            stop_atr_scale = 0.92
-            trade_risk_pct = min(0.03, target_risk * 1.5)   # 목표 레버리지: ~2-3×
+            stop_atr_scale = 0.88
+            trade_risk_pct = min(0.05, target_risk * 2.5)   # 목표 레버리지: ~4-6×
         else:
             stop_atr_scale = 1.00
-            trade_risk_pct = min(0.02, target_risk * 1.0)   # 기본값: ~1-2×
+            trade_risk_pct = min(0.03, target_risk * 1.5)   # 기본값: ~2-3×
 
         # ── Step 1: Stop distance (signal-scaled + vol-adjusted + minimum floor) ──
         # 변동성 적응형 스탑: ATR이 작을수록 배수 확대 (노이즈 대비)

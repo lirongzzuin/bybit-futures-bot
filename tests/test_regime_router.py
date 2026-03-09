@@ -100,16 +100,16 @@ class TestBasicClassification:
         assert s[1] == "TREND_RIDE"
         assert s[2] == +1
         assert s[3] == 1.00
-        assert s[4] == 10
+        assert s[4] == 20
 
     def test_bull_routing(self):
-        """BULL → strategy=trend, SCALP, +1 bias, 80% risk."""
+        """BULL → strategy=trend, SCALP, +1 bias, 90% risk."""
         s = _ROUTING_TABLE[DynamicRegime.BULL]
         assert s[0] == "trend"
         assert s[1] == "SCALP"
         assert s[2] == +1
-        assert s[3] == 0.80
-        assert s[4] == 8
+        assert s[3] == 0.90
+        assert s[4] == 15
 
     def test_strong_bear_routing(self):
         """STRONG_BEAR → strategy=trend, TREND_RIDE, -1 bias."""
@@ -118,16 +118,16 @@ class TestBasicClassification:
         assert s[1] == "TREND_RIDE"
         assert s[2] == -1
         assert s[3] == 1.00
-        assert s[4] == 10
+        assert s[4] == 20
 
     def test_bear_routing(self):
-        """BEAR → strategy=trend, SCALP, -1 bias, 80% risk."""
+        """BEAR → strategy=trend, SCALP, -1 bias, 90% risk."""
         s = _ROUTING_TABLE[DynamicRegime.BEAR]
         assert s[0] == "trend"
         assert s[1] == "SCALP"
         assert s[2] == -1
-        assert s[3] == 0.80
-        assert s[4] == 8
+        assert s[3] == 0.90
+        assert s[4] == 15
 
     def test_sideways_routing(self):
         """SIDEWAYS → strategy=skip (방향성 없는 장세 진입 금지)."""
@@ -273,7 +273,7 @@ class TestDirectionBias:
         router._state["BTC"] = _SymbolState(confirmed_regime=DynamicRegime.STRONG_BULL)
         r = _force_regime(router, "BTC", DynamicRegime.STRONG_BULL, df)
         assert r.direction_bias == +1
-        assert r.leverage_cap == 10
+        assert r.leverage_cap == 20
 
     def test_strong_bear_direction_minus_one(self):
         """STRONG_BEAR RouterResult → direction_bias=-1."""

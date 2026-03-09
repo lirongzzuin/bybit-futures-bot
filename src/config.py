@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     MAX_DRAWDOWN_PCT: float = 0.30             # 30% → REDUCE 트리거 (포지션 비중 축소 시작)
     PAUSE_DRAWDOWN_PCT: float = 0.42           # 42% → PAUSE (신규 진입 중단, 기존 포지션 관리)
     HALT_DRAWDOWN_PCT: float = 0.50            # 50% → HALT (긴급 전면 중단 — 계좌 보호 핵심)
-    MAX_LEVERAGE_CAP: int = 10                 # 10× max leverage (보수적 리스크 관리)
+    MAX_LEVERAGE_CAP: int = 20                 # 20× max leverage (검증된 전략 + 추세 전용)
     MAX_CONCURRENT_POSITIONS: int = 2
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
@@ -234,7 +234,7 @@ class Settings(BaseSettings):
     # BEAR/SIDEWAYS 모드 심볼: 하락장/횡보장 — BTC + ETH만 거래
     BEAR_MODE_SYMBOLS: str = "BTCUSDT,ETHUSDT"
     # Bear/Sideways 모드에서 허용하는 최대 레버리지 (고배율 스캘핑)
-    BEAR_MAX_LEVERAGE_CAP: int = 10
+    BEAR_MAX_LEVERAGE_CAP: int = 20
     # 매크로 레짐 체크 주기 (시간)
     MACRO_REGIME_CHECK_HOURS: int = 4
     # BULL 전환 확정에 필요한 연속 신호 횟수
