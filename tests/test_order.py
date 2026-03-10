@@ -146,8 +146,15 @@ class TestStateMachine:
 
     def test_signal_flip_exits(self):
         self._enter_long()
+        # Grace period: SIGNAL_FLIP은 6봉 이후에만 발동
         exit_sig = self.sm.check_exit("BTCUSDT", current_price=50100,
-                                       current_atr=500, signal_direction=-1)
+                                       current_atr=500, signal_direction=-1,
+                                       bars_in_trade=2)
+        assert not exit_sig.should_exit  # grace period 내 — exit 안 함
+
+        exit_sig = self.sm.check_exit("BTCUSDT", current_price=50100,
+                                       current_atr=500, signal_direction=-1,
+                                       bars_in_trade=6)
         assert exit_sig.should_exit
         assert exit_sig.reason == ExitReason.SIGNAL_FLIP
 

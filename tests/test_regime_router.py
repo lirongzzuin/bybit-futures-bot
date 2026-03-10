@@ -94,58 +94,50 @@ def _force_regime(
 class TestBasicClassification:
 
     def test_strong_bull_routing(self):
-        """STRONG_BULL → strategy=trend, TREND_RIDE, +1 bias."""
+        """STRONG_BULL → strategy=trend, TREND_RIDE, +1 bias, 5× cap."""
         s = _ROUTING_TABLE[DynamicRegime.STRONG_BULL]
         assert s[0] == "trend"
         assert s[1] == "TREND_RIDE"
         assert s[2] == +1
         assert s[3] == 1.00
-        assert s[4] == 20
+        assert s[4] == 5
 
     def test_bull_routing(self):
-        """BULL → strategy=trend, SCALP, +1 bias, 90% risk."""
+        """BULL → strategy=trend, SCALP, +1 bias, 80% risk, 5× cap."""
         s = _ROUTING_TABLE[DynamicRegime.BULL]
         assert s[0] == "trend"
         assert s[1] == "SCALP"
         assert s[2] == +1
-        assert s[3] == 0.90
-        assert s[4] == 15
+        assert s[3] == 0.80
+        assert s[4] == 5
 
     def test_strong_bear_routing(self):
-        """STRONG_BEAR → strategy=trend, TREND_RIDE, -1 bias."""
+        """STRONG_BEAR → strategy=trend, TREND_RIDE, -1 bias, 5× cap."""
         s = _ROUTING_TABLE[DynamicRegime.STRONG_BEAR]
         assert s[0] == "trend"
         assert s[1] == "TREND_RIDE"
         assert s[2] == -1
         assert s[3] == 1.00
-        assert s[4] == 20
+        assert s[4] == 5
 
     def test_bear_routing(self):
-        """BEAR → strategy=trend, SCALP, -1 bias, 90% risk."""
+        """BEAR → strategy=trend, SCALP, -1 bias, 80% risk, 5× cap."""
         s = _ROUTING_TABLE[DynamicRegime.BEAR]
         assert s[0] == "trend"
         assert s[1] == "SCALP"
         assert s[2] == -1
-        assert s[3] == 0.90
-        assert s[4] == 15
+        assert s[3] == 0.80
+        assert s[4] == 5
 
     def test_sideways_routing(self):
-        """SIDEWAYS → strategy=scalp, PURE_SCALP, 양방향, 80% risk, 10× cap."""
+        """SIDEWAYS → skip (횡보장 진입 금지)."""
         s = _ROUTING_TABLE[DynamicRegime.SIDEWAYS]
-        assert s[0] == "scalp"
-        assert s[1] == "PURE_SCALP"
-        assert s[2] == 0
-        assert s[3] == 0.80
-        assert s[4] == 10
+        assert s[0] == "skip"
 
     def test_volatile_routing(self):
-        """VOLATILE → strategy=scalp, PURE_SCALP, 양방향, 50% risk, 8× cap."""
+        """VOLATILE → skip (변동성 급등 진입 금지)."""
         s = _ROUTING_TABLE[DynamicRegime.VOLATILE]
-        assert s[0] == "scalp"
-        assert s[1] == "PURE_SCALP"
-        assert s[2] == 0
-        assert s[3] == 0.50
-        assert s[4] == 8
+        assert s[0] == "skip"
 
     def test_transition_routing(self):
         """TRANSITION → strategy=skip, risk=0."""
@@ -277,7 +269,7 @@ class TestDirectionBias:
         router._state["BTC"] = _SymbolState(confirmed_regime=DynamicRegime.STRONG_BULL)
         r = _force_regime(router, "BTC", DynamicRegime.STRONG_BULL, df)
         assert r.direction_bias == +1
-        assert r.leverage_cap == 20
+        assert r.leverage_cap == 5
 
     def test_strong_bear_direction_minus_one(self):
         """STRONG_BEAR RouterResult → direction_bias=-1."""
@@ -287,13 +279,13 @@ class TestDirectionBias:
         r = _force_regime(router, "BTC", DynamicRegime.STRONG_BEAR, df)
         assert r.direction_bias == -1
 
-    def test_sideways_allows_both_directions(self):
-        """SIDEWAYS → direction_bias=0 (양방향 허용)."""
+    def test_sideways_is_skip(self):
+        """SIDEWAYS → strategy=skip (횡보장 진입 금지)."""
         router = RegimeRouter(make_settings(REGIME_ROUTER_CONFIRM_BARS=1))
         df = make_ohlcv(500)
         router._state["BTC"] = _SymbolState(confirmed_regime=DynamicRegime.SIDEWAYS)
         r = _force_regime(router, "BTC", DynamicRegime.SIDEWAYS, df)
-        assert r.direction_bias == 0
+        assert r.strategy == "skip"
 
 
 # ── 18-19: macro_bear 오버라이드 ─────────────────────────────────────────────
@@ -371,14 +363,13 @@ class TestEdgeCases:
         # 미등록 심볼 → 기본값 SIDEWAYS
         assert router.get_confirmed_regime("NEWUSDT") == DynamicRegime.SIDEWAYS
 
-    def test_volatile_risk_multiplier_is_half(self):
-        """VOLATILE 레짐 → strategy=scalp, risk_multiplier=0.50 (50% 축소)."""
+    def test_volatile_is_skip(self):
+        """VOLATILE 레짐 → strategy=skip (변동성 급등 진입 금지)."""
         router = RegimeRouter(make_settings(REGIME_ROUTER_CONFIRM_BARS=1))
         df = make_ohlcv(500)
         router._state["BTC"] = _SymbolState(confirmed_regime=DynamicRegime.VOLATILE)
         r = _force_regime(router, "BTC", DynamicRegime.VOLATILE, df)
-        assert r.risk_multiplier == 0.50
-        assert r.strategy == "scalp"
+        assert r.strategy == "skip"
 
     def test_classify_pure_function_returns_tuple(self):
         """_classify가 (DynamicRegime, float, str) 튜플을 반환한다."""

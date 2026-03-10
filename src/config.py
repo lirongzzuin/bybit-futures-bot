@@ -49,13 +49,13 @@ class Settings(BaseSettings):
     MAX_DRAWDOWN_PCT: float = 0.30             # 30% → REDUCE 트리거 (포지션 비중 축소 시작)
     PAUSE_DRAWDOWN_PCT: float = 0.42           # 42% → PAUSE (신규 진입 중단, 기존 포지션 관리)
     HALT_DRAWDOWN_PCT: float = 0.50            # 50% → HALT (긴급 전면 중단 — 계좌 보호 핵심)
-    MAX_LEVERAGE_CAP: int = 20                 # 20× max leverage (검증된 전략 + 추세 전용)
+    MAX_LEVERAGE_CAP: int = 5                  # 5× max leverage (보수적 — 손절 빈도 감소 우선)
     MAX_CONCURRENT_POSITIONS: int = 2
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
     # ── Signal Settings ───────────────────────────────────────
-    SIGNAL_ENTRY_THRESHOLD: float = 0.80       # 고확신 진입만 허용 (0.75→0.80 상향, 강한 신호만 거래)
+    SIGNAL_ENTRY_THRESHOLD: float = 0.85       # 고확신 진입만 허용 (강한 신호만 거래)
     SIGNAL_EXIT_THRESHOLD: float = 0.38
     SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
     TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
@@ -64,18 +64,18 @@ class Settings(BaseSettings):
 
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.5               # SL: 1.5× ATR (확대 — 15분봉 노이즈 대응)
-    SCALP_TP1_ATR: float = 2.0                # TP1 R:R 1.33:1 — 빠른 수익 확보
-    SCALP_TP2_ATR: float = 4.5                # TP2 R:R 3.0:1 — 합리적 타겟
+    SCALP_STOP_ATR: float = 1.5               # SL: 1.5× ATR (15분봉 노이즈 대응)
+    SCALP_TP1_ATR: float = 2.0                # TP1 R:R 1.33:1 — 빠른 트레일링 활성화
+    SCALP_TP2_ATR: float = 8.0                # TP2 R:R 5.3:1 — 추세 극대화
     SCALP_MAX_BARS: int = 48                   # 15분봉 × 48 = 12시간 최대
-    SCALP_PARTIAL_EXIT_PCT: float = 0.40       # 40% TP1에서 청산, 60% 추세 유지 (수익 극대화)
+    SCALP_PARTIAL_EXIT_PCT: float = 0.0        # TP1은 트레일링 활성화만, 부분 청산 없음
 
     # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
-    TREND_STOP_ATR: float = 2.5               # SL: 2.5× ATR (확대 — 추세 타이트 스탑 방지)
-    TREND_TP1_ATR: float = 3.0                # TP1 R:R 1.2:1 — 확실한 수익 확보
-    TREND_TP2_ATR: float = 8.0                # TP2 R:R 3.2:1 — 추세 극대화
+    TREND_STOP_ATR: float = 2.5               # SL: 2.5× ATR (추세 스탑)
+    TREND_TP1_ATR: float = 3.5                # TP1 R:R 1.4:1 — 빠른 수익 확보
+    TREND_TP2_ATR: float = 10.0               # TP2 R:R 4.0:1 — 추세 극대화
     TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
-    TREND_PARTIAL_EXIT_PCT: float = 0.30       # close 30% at TP1, keep 70% for full run (추세 수익 극대화)
+    TREND_PARTIAL_EXIT_PCT: float = 0.0        # TP1은 트레일링 활성화만, 부분 청산 없음
     TREND_RIDE_SCORE_THRESHOLD: int = 1        # allow trend ride more often
 
     # ── Pure Scalping Strategy Parameters (STRATEGY_MODE="scalp") ──────────
@@ -107,9 +107,9 @@ class Settings(BaseSettings):
     # ── Minimum Stop Distance (노이즈 터짐 방지) ─────────────────────────
     # ATR × 배수가 너무 작을 때 스탑이 즉시 터지는 것 방지 (가격 대비 최소 %)
     # 3분봉 ATR은 15분봉 대비 ~3× 작으므로 TREND_RIDE 모드에서 특히 중요
-    MIN_STOP_PCT_PURE_SCALP: float = 0.004   # 최소 0.4% — 3분봉 노이즈 흡수
-    MIN_STOP_PCT_SCALP: float = 0.007        # 최소 0.7% — 15분봉 노이즈 흡수
-    MIN_STOP_PCT_TREND_RIDE: float = 0.012   # 최소 1.2% — 추세 큰 노이즈 흡수
+    MIN_STOP_PCT_PURE_SCALP: float = 0.005   # 최소 0.5% — 3분봉 노이즈 흡수
+    MIN_STOP_PCT_SCALP: float = 0.008        # 최소 0.8% — 15분봉 노이즈 흡수
+    MIN_STOP_PCT_TREND_RIDE: float = 0.015   # 최소 1.5% — 추세 큰 노이즈 흡수
 
     # ── Trend EMA Strategy Parameters (STRATEGY_MODE="trend") ──────────
     # Phase-locked direction: BULL_TREND=LONG만, BEAR_TREND=SHORT만, SIDEWAYS=양방향
@@ -206,10 +206,10 @@ class Settings(BaseSettings):
     BACKTEST_FUNDING_RATE_AVG: float = 0.0001  # avg funding rate per 8h interval
 
     # ── Quality Gate (MTF 전략 기준 상향) ────────────────────────
-    QUALITY_GATE_SHARPE: float = 1.0
+    QUALITY_GATE_SHARPE: float = 0.0            # 양수 Sharpe (보수적 전략)
     QUALITY_GATE_MDD: float = 0.25
-    QUALITY_GATE_WIN_RATE: float = 0.45        # 추세추종 현실적 승률 (45%+, R:R 보상)
-    QUALITY_GATE_PROFIT_FACTOR: float = 1.2    # PF 1.2+ (실질 수익성 확보)
+    QUALITY_GATE_WIN_RATE: float = 0.30        # 추세추종: 낮은 승률 + 높은 R:R (30%+)
+    QUALITY_GATE_PROFIT_FACTOR: float = 1.0    # PF 1.0+ (순이익 확보)
     QUALITY_GATE_MIN_TRADES: int = 50          # MTF는 진입 횟수 줄어드므로 조정
     QUALITY_GATE_PASSED: bool = False      # flipped only by backtest runner
 
@@ -234,7 +234,7 @@ class Settings(BaseSettings):
     # BEAR/SIDEWAYS 모드 심볼: 하락장/횡보장 — BTC + ETH만 거래
     BEAR_MODE_SYMBOLS: str = "BTCUSDT,ETHUSDT"
     # Bear/Sideways 모드에서 허용하는 최대 레버리지 (고배율 스캘핑)
-    BEAR_MAX_LEVERAGE_CAP: int = 20
+    BEAR_MAX_LEVERAGE_CAP: int = 5
     # 매크로 레짐 체크 주기 (시간)
     MACRO_REGIME_CHECK_HOURS: int = 4
     # BULL 전환 확정에 필요한 연속 신호 횟수

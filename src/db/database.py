@@ -304,6 +304,31 @@ class Database:
             wins = int(win_row[0] or 0)
             return wins / total
 
+    def get_trades_with_extra(self, days: int = 7) -> List[Dict]:
+        """최근 N일간 청산된 거래 (extra JSON 포함) — 분석용."""
+        cutoff = time.time() - days * 86400
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE exit_ts IS NOT NULL AND exit_ts >= ? "
+                "ORDER BY exit_ts DESC",
+                (cutoff,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_trade_extra(self, trade_id: int, extra: Dict) -> None:
+        """거래의 extra JSON 필드를 업데이트 (기존 데이터와 병합)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT extra FROM trades WHERE id=?", (trade_id,)
+            ).fetchone()
+            if row:
+                existing = json.loads(row[0] or "{}")
+                existing.update(extra)
+                conn.execute(
+                    "UPDATE trades SET extra=? WHERE id=?",
+                    (json.dumps(existing), trade_id),
+                )
+
     def get_consecutive_losses(self, symbol: Optional[str] = None) -> int:
         """Count consecutive losses from the most recent trades."""
         with self._conn() as conn:

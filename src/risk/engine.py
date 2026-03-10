@@ -130,21 +130,23 @@ class RiskEngine:
         target_risk = self._s.MAX_RISK_PER_TRADE_PCT
         # 공격적 복리 성장: 검증된 전략 + 추세 전용 → 강신호에 집중 베팅
         # MDD 22% 이내 유지, CAGR 극대화 (경제적 자유 목표)
+        # 보수적 레버리지: 넓은 스탑 + 적정 리스크% → 최대 5×
+        # 수수료 대비 충분한 수익을 내려면 적절한 포지션 사이즈 필요
         if signal_strength >= 0.85 and dd_escalation_allowed:
-            stop_atr_scale = 0.68           # 넉넉한 스탑 → 노이즈 방지
-            trade_risk_pct = min(0.12, target_risk * 6.0)   # 목표 레버리지: ~12-16×
+            stop_atr_scale = 0.85           # 넉넉한 스탑
+            trade_risk_pct = min(0.04, target_risk * 2.0)   # 목표: ~3-4×
         elif signal_strength >= 0.80 and dd_escalation_allowed:
-            stop_atr_scale = 0.73
-            trade_risk_pct = min(0.10, target_risk * 5.0)   # 목표 레버리지: ~10-13×
+            stop_atr_scale = 0.90
+            trade_risk_pct = min(0.035, target_risk * 1.75)  # 목표: ~3×
         elif signal_strength >= 0.75 and dd_escalation_allowed:
-            stop_atr_scale = 0.80
-            trade_risk_pct = min(0.07, target_risk * 3.5)   # 목표 레버리지: ~7-9×
+            stop_atr_scale = 0.95
+            trade_risk_pct = min(0.03, target_risk * 1.5)   # 목표: ~2-3×
         elif signal_strength >= 0.65:
-            stop_atr_scale = 0.88
-            trade_risk_pct = min(0.05, target_risk * 2.5)   # 목표 레버리지: ~4-6×
-        else:
             stop_atr_scale = 1.00
-            trade_risk_pct = min(0.03, target_risk * 1.5)   # 기본값: ~2-3×
+            trade_risk_pct = min(0.025, target_risk * 1.25)  # 목표: ~2×
+        else:
+            stop_atr_scale = 1.10
+            trade_risk_pct = min(0.02, target_risk * 1.0)   # 기본값: ~1-2×
 
         # ── Step 1: Stop distance (signal-scaled + vol-adjusted + minimum floor) ──
         # 변동성 적응형 스탑: ATR이 작을수록 배수 확대 (노이즈 대비)
@@ -354,9 +356,9 @@ class RiskEngine:
         # SCALP/TREND_RIDE (15분봉): TP1=2.5-4.0×ATR — 여유 있음, 2.0× 유지
         #   PostOnly: 0.080%×2.0 = 0.160% → ATR >= 0.064% 필요
         if resolved_mode == "PURE_SCALP":
-            fee_safety_multiplier = 1.5   # 3분봉 스캘핑: 1.5× (수수료의 1.5배 확보)
+            fee_safety_multiplier = 2.5   # 3분봉 스캘핑: 2.5× (수수료의 2.5배 확보)
         else:
-            fee_safety_multiplier = 2.0   # 15분봉 스윙/SCALP: 2.0× (보수적)
+            fee_safety_multiplier = 3.0   # 15분봉 스윙/SCALP: 3.0× (수수료 대비 충분한 마진)
 
         if tp1_move_pct < round_trip_fee_pct * fee_safety_multiplier:
             entry_type = "Taker(시장가)" if entry_is_market else "Maker(PostOnly)"

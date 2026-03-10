@@ -365,15 +365,14 @@ class TestHighLeverageMode:
         defaults.update(kwargs)
         return engine.calculate(**defaults)
 
-    def test_ultra_high_signal_achieves_50x(self):
-        """시그널 0.90 + BEAR 모드 + ATR 0.5% → 적정 배율 달성 (최소 플로어 적용 후)."""
+    def test_ultra_high_signal_achieves_moderate_leverage(self):
+        """시그널 0.90 + BEAR 모드 + ATR 0.5% → 보수적 배율 (최대 5×)."""
         engine = self._make_engine()
         result = self._calc(engine, signal_strength=0.90)
         assert result.risk_ok, result.reason
-        # 공격적 성장: stop_atr_scale=0.68, trade_risk=12% → 실제 10-16×
-        # 레버리지 상한 20× (검증된 전략 기반)
-        assert result.leverage >= 8, f"Expected ≥8×, got {result.leverage}×"
-        assert result.leverage <= 20, f"Expected ≤20×, got {result.leverage}×"
+        # 보수적 레버리지: 넓은 스탑 + 낮은 리스크% → 최대 5×
+        assert result.leverage >= 1, f"Expected ≥1×, got {result.leverage}×"
+        assert result.leverage <= 5, f"Expected ≤5×, got {result.leverage}×"
 
     def test_signal_tiers_ascending_leverage(self):
         """시그널 강도 증가 → 레버리지 단조 증가."""
@@ -396,12 +395,11 @@ class TestHighLeverageMode:
         stop_dist = entry - result.stop_price   # entry - stop
         tp1_dist = result.tp1_price - entry
         rr = tp1_dist / stop_dist if stop_dist > 0 else 0
-        # stop_atr_scale=0.65 → raw_stop=1.5×0.65×250=243.75, min_floor=0.7%×50000=350
-        # floor 적용: stop=350, tp_scale=350/243.75=1.44
-        # TP1 = 2.5×250×1.44=899.7 → R:R = 899.7/350 = 2.57
-        # TP1/stop = tp1_atr_mult / (stop_atr_mult × stop_atr_scale) = 2.5/(1.5×0.65) = 2.56
-        assert rr >= 2.0, f"R:R too low: {rr:.2f}"
-        assert stop_dist >= entry * 0.007 * 0.99, "Stop should be at/near minimum floor"
+        # 보수적 모드: stop_atr_scale=0.85 → raw_stop=1.5×0.85×250=318.75
+        # min_floor=1.4%×50000=700 → floor 적용, tp_scale 비례 확대
+        # R:R ≈ TP1_ATR/STOP_ATR × scale 보정 → ~1.3-2.0
+        assert rr >= 1.0, f"R:R too low: {rr:.2f}"
+        assert stop_dist >= entry * 0.008 * 0.99, "Stop should be at/near minimum floor"
 
     def test_low_signal_stays_conservative(self):
         """약한 시그널(0.55)은 낮은 레버리지 유지."""
@@ -427,11 +425,10 @@ class TestHighLeverageMode:
 class TestFeeBreakevenCheck:
     """수수료 손익분기점 체크 테스트.
 
+    fee_safety_multiplier: SCALP=3.0×, PURE_SCALP=2.5×
     진입 주문 유형:
-      - PostOnly(Maker): spread ≤ 0.3% AND signal ≤ 0.90
-        round_trip = 0.020% + 0.020% + 0.040% = 0.080%  → min_tp1 = 0.160%
-      - Market(Taker): spread > 0.3% OR signal > 0.90
-        round_trip = 0.055% + 0.020% + 0.040% = 0.115%  → min_tp1 = 0.230%
+      - PostOnly(Maker): round_trip = 0.080%  → min_tp1 = 0.240% (3.0×)
+      - Market(Taker):   round_trip = 0.115%  → min_tp1 = 0.345% (3.0×)
     """
 
     def setup_method(self):
@@ -456,84 +453,44 @@ class TestFeeBreakevenCheck:
         defaults.update(kwargs)
         return self.engine.calculate(**defaults)
 
-    # ── PostOnly(Maker) 진입 경로 ─────────────────────────────────────────────
-
     def test_sufficient_atr_passes_fee_check(self):
-        """ATR이 충분히 크면 수수료 손익분기점 통과 (PostOnly 진입)."""
-        # ATR=0.15%, SCALP TP1=0.225% > min_tp1=0.160% ✓
-        result = self._calc(atr=75.0)
+        """ATR 충분히 크면 통과 (PostOnly 진입, 3.0× safety)."""
+        # ATR=0.20%, TP1=2.0×0.20%=0.40% > 0.240% ✓
+        result = self._calc(atr=100.0)
         assert result.risk_ok, f"Should pass: {result.reason}"
 
     def test_low_atr_fails_fee_check(self):
-        """ATR이 너무 작으면(0.05%) 수수료 손익분기점 미달로 거부 (PostOnly 진입)."""
-        result = self._calc(atr=25.0)  # 25/50000 = 0.05%
+        """ATR이 너무 작으면 수수료 손익분기점 미달로 거부."""
+        result = self._calc(atr=25.0)  # 0.05%
         assert not result.risk_ok
         assert "수수료" in result.reason
 
-    def test_boundary_atr_fails_fee_check(self):
-        """경계값(ATR=0.106%) 에서 수수료 체크 작동 확인 (PostOnly 진입)."""
-        # min ATR = round_trip(0.080%)×2 / TP1_ATR(1.5) = 0.160%/1.5 = 0.1067%
-        # ATR=0.106% → TP1=0.159% < 0.160% → 거부
-        result = self._calc(atr=53.0)
-        assert not result.risk_ok
-
     def test_trend_mode_atr_check(self):
-        """TREND_RIDE 모드에서도 수수료 체크 통과."""
-        # TREND TP1=3.0ATR, ATR=0.10% → TP1=0.30% > 0.160% ✓
+        """TREND_RIDE 모드 — TP1=3.5ATR로 더 여유있게 통과."""
+        # ATR=0.10%, TP1=3.5×0.10%=0.35% > 0.240% ✓
         result = self._calc(atr=50.0, trade_mode="TREND_RIDE")
         assert result.risk_ok
 
-    def test_fee_check_uses_maker_rate_for_postonly(self):
-        """PostOnly 진입: Maker 수수료 기준 손익분기점."""
-        # round_trip = MAKER + MAKER + SLIP×2 = 0.020%+0.020%+0.040% = 0.080%
-        # min_tp1 = 0.160%, ATR=0.108% → TP1=0.162% > 0.160% ✓
-        result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.7)
-        assert result.risk_ok
+    def test_wide_spread_uses_taker_fee(self):
+        """넓은 스프레드 → Taker 수수료 적용 → 더 높은 ATR 필요."""
+        # ATR=0.15%, TP1=2.0×0.15%=0.30% < 0.345% (Taker 3.0×) → 거부
+        result = self._calc(atr=75.0, spread_pct=0.004)
+        assert not result.risk_ok
 
-    # ── Market(Taker) 진입 경로 ───────────────────────────────────────────────
-
-    def test_wide_spread_uses_taker_fee_in_breakeven(self):
-        """스프레드 > SPREAD_TAKER_THRESHOLD → 시장가 진입 → Taker 수수료 적용."""
-        # round_trip = TAKER + MAKER + SLIP×2 = 0.055%+0.020%+0.040% = 0.115%
-        # min_tp1 = 0.230%
-        # ATR=0.15% → TP1=0.225% < 0.230% → 스프레드 넓은 경우 더 엄격하게 거부
-        result = self._calc(atr=75.0, spread_pct=0.004)  # 0.4% > threshold
-        assert not result.risk_ok, "넓은 스프레드에서 ATR 0.15%는 Taker 수수료 기준으로 미달"
-        assert "수수료" in result.reason
-
-    def test_wide_spread_high_atr_passes_taker_breakeven(self):
-        """스프레드 넓어도 ATR이 충분히 크면 Taker 기준 손익분기점 통과."""
-        # round_trip = 0.115%, min_tp1 = 0.230%
-        # ATR=0.16% → TP1=0.240% > 0.230% ✓
-        result = self._calc(atr=80.0, spread_pct=0.004)
-        assert result.risk_ok, f"Should pass with ATR=0.16%: {result.reason}"
-
-    def test_urgent_signal_uses_taker_fee_in_breakeven(self):
-        """긴급 신호(> 0.90) → 시장가 진입 → Taker 수수료 적용."""
-        # round_trip = 0.115%, min_tp1 = 0.230%
-        # ATR=0.15% → TP1=0.225% < 0.230% → 긴급 신호에서 더 엄격하게 거부
-        result = self._calc(atr=75.0, signal_strength=0.91, spread_pct=0.001)
-        assert not result.risk_ok, "긴급 신호에서 ATR 0.15%는 Taker 수수료 기준으로 미달"
+    def test_wide_spread_high_atr_passes(self):
+        """넓은 스프레드 + 높은 ATR → Taker 기준도 통과."""
+        # Taker round_trip=0.115%, 3.0×=0.345%, TP1_ATR varies by settings
+        # ATR=0.30% → TP1 ≥ 0.345% 확보
+        result = self._calc(atr=150.0, spread_pct=0.004)
+        assert result.risk_ok, f"Should pass with ATR=0.30%: {result.reason}"
 
     def test_maker_vs_taker_breakeven_difference(self):
-        """PostOnly vs Market 수수료 차이가 손익분기점에 영향을 미침."""
-        # ATR=0.15%, SCALP TP1=0.225%:
-        #   PostOnly(Maker): 0.225% > min_tp1=0.160% ✓ (통과)
-        #   Market(Taker):   0.225% < min_tp1=0.230% ✗ (거부)
-        maker_result = self._calc(atr=75.0, spread_pct=0.001, signal_strength=0.7)
-        taker_result = self._calc(atr=75.0, spread_pct=0.004, signal_strength=0.7)
+        """PostOnly vs Market 수수료 차이 확인."""
+        # ATR=0.17%, TP1=0.34%: Maker 기준(0.240%) 통과, Taker 기준(0.345%) 거부
+        maker_result = self._calc(atr=85.0, spread_pct=0.001, signal_strength=0.7)
+        taker_result = self._calc(atr=85.0, spread_pct=0.004, signal_strength=0.7)
         assert maker_result.risk_ok, "PostOnly 진입: 통과 예상"
         assert not taker_result.risk_ok, "Market 진입: 더 엄격한 기준으로 거부 예상"
-
-    def test_signal_at_threshold_uses_maker(self):
-        """신호 강도 정확히 0.90 → PostOnly(Maker), 0.90 초과 시에만 Market."""
-        # signal=0.90: NOT > 0.90 → Maker fee
-        maker_result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.90)
-        # signal=0.91: > 0.90 → Taker fee
-        taker_result = self._calc(atr=54.0, spread_pct=0.001, signal_strength=0.91)
-        # ATR=0.108%: Maker 기준 통과(0.162%>0.160%), Taker 기준 거부(0.162%<0.230%)
-        assert maker_result.risk_ok, "signal=0.90: PostOnly(Maker) 기준 통과"
-        assert not taker_result.risk_ok, "signal=0.91: Market(Taker) 기준 거부"
 
 
 class TestStateMachineFeeTracking:

@@ -320,23 +320,28 @@ class StateMachine:
                 message="Regime changed adversely",
             )
 
-        # Strong counter-signal → exit
-        if pos.is_long and signal_direction == -1:
-            return ExitSignal(
-                should_exit=True,
-                reason=ExitReason.SIGNAL_FLIP,
-                message="Strong counter-signal against long",
-            )
-        if pos.is_short and signal_direction == 1:
-            return ExitSignal(
-                should_exit=True,
-                reason=ExitReason.SIGNAL_FLIP,
-                message="Strong counter-signal against short",
-            )
+        # Strong counter-signal → exit (with grace period)
+        # 라이브 손실의 42%가 SIGNAL_FLIP — 진입 직후 노이즈에 의한 조기 청산 방지
+        # Grace period: 최소 6봉(1.5시간) 이상 보유 후에만 SIGNAL_FLIP 허용
+        signal_flip_grace_bars = 6
+        if bars_in_trade >= signal_flip_grace_bars:
+            if pos.is_long and signal_direction == -1:
+                return ExitSignal(
+                    should_exit=True,
+                    reason=ExitReason.SIGNAL_FLIP,
+                    message=f"Counter-signal against long (after {bars_in_trade} bars)",
+                )
+            if pos.is_short and signal_direction == 1:
+                return ExitSignal(
+                    should_exit=True,
+                    reason=ExitReason.SIGNAL_FLIP,
+                    message=f"Counter-signal against short (after {bars_in_trade} bars)",
+                )
 
         # ── 4b. Signal weakness exit (SIGNAL_EXIT_THRESHOLD) ─────────────────
         # If same direction but signal strength fell below exit threshold, exit
-        if exit_threshold > 0 and signal_strength < exit_threshold:
+        # Grace period 동일 적용 — 진입 직후 시그널 약화에 의한 조기 청산 방지
+        if exit_threshold > 0 and signal_strength < exit_threshold and bars_in_trade >= signal_flip_grace_bars:
             if (pos.is_long and signal_direction != -1) or (pos.is_short and signal_direction != 1):
                 return ExitSignal(
                     should_exit=True,

@@ -34,6 +34,7 @@ from src.execution.order_manager import OrderManager
 from src.execution.state_machine import StateMachine
 from src.logger import get_logger
 from src.reporting.daily_briefing import DailyBriefing
+from src.reporting.trade_analyzer import TradeAnalyzer
 from src.risk.correlation import CorrelationGuard
 from src.risk.engine import RiskEngine
 from src.risk.guards import GuardAction, RiskGuards
@@ -86,6 +87,7 @@ class TradingBot:
             slack=self._slack,
             initial_capital=settings.PAPER_CAPITAL_USDT,
         )
+        self._trade_analyzer = TradeAnalyzer(self._db, self._slack, settings)
 
         # ── Macro Regime ───────────────────────────────────────────────────────
         self._macro_detector = MacroRegimeDetector(self._client, settings)
@@ -422,7 +424,17 @@ class TradingBot:
         )
 
         # Execute entry
-        self._execute_entry(symbol, combined.direction, risk_params, snap, sym_info, combined.strength)
+        dd_pct = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0
+        self._execute_entry(
+            symbol, combined.direction, risk_params, snap, sym_info,
+            signal_strength=combined.strength,
+            combined=combined,
+            regime_r=regime_r,
+            trade_mode_str=trade_mode_str,
+            vol_pct=vol_pct,
+            drawdown_pct=dd_pct,
+            consecutive_losses=consec,
+        )
 
     # ── Strategy Signal Methods ────────────────────────────────────────────────
 
@@ -667,7 +679,10 @@ class TradingBot:
     # ── Order Execution ───────────────────────────────────────────────────────
 
     def _execute_entry(
-        self, symbol, direction, risk_params, snap, sym_info, signal_strength: float = 0.7
+        self, symbol, direction, risk_params, snap, sym_info,
+        signal_strength: float = 0.7, combined=None, regime_r=None,
+        trade_mode_str: str = "", vol_pct: float = 0.5,
+        drawdown_pct: float = 0.0, consecutive_losses: int = 0,
     ) -> None:
         order = self._order_mgr.open_position(
             symbol=symbol,
@@ -689,6 +704,50 @@ class TradingBot:
                 else settings.BACKTEST_FEE_MAKER
             )
             entry_fee = qty * entry_price * entry_fee_rate
+
+            # ── 상세 진입 컨텍스트 기록 (손실 분석용) ─────────────────
+            extra = {
+                "signal_strength": round(signal_strength, 4),
+                "direction": direction,
+                "regime": regime_r.regime.value if regime_r else "",
+                "trade_mode": trade_mode_str or risk_params.trade_mode,
+                "atr_pct": round(
+                    abs(risk_params.stop_price - entry_price) / entry_price
+                    / (risk_params.leverage or 1) * (risk_params.leverage or 1),
+                    6,
+                ) if entry_price > 0 else 0,
+                "stop_distance_pct": round(
+                    abs(risk_params.stop_price - entry_price) / entry_price, 6
+                ) if entry_price > 0 else 0,
+                "tp1_distance_pct": round(
+                    abs(risk_params.tp1_price - entry_price) / entry_price, 6
+                ) if entry_price > 0 and risk_params.tp1_price > 0 else 0,
+                "spread_pct": round(snap.orderbook.spread_pct, 6),
+                "funding_rate": round(snap.funding_rate, 6),
+                "vol_percentile": round(vol_pct, 4),
+                "drawdown_pct": round(drawdown_pct, 4),
+                "consecutive_losses": consecutive_losses,
+                "leverage": risk_params.leverage,
+                "entry_order_type": order.order_type or "unknown",
+                "macro_regime": self._macro_mode,
+                "category_scores": (
+                    {k: round(v, 4) for k, v in combined.category_scores.items()}
+                    if combined and hasattr(combined, "category_scores")
+                    else {}
+                ),
+                "long_score": round(combined.long_score, 4) if combined else 0,
+                "short_score": round(combined.short_score, 4) if combined else 0,
+            }
+            # auto 모드 추가 정보
+            if settings.STRATEGY_MODE == "auto":
+                extra["auto_regime"] = str(
+                    self._auto_direction_bias.get(symbol, 0)
+                )
+                extra["auto_risk_mult"] = self._auto_risk_multiplier.get(symbol, 1.0)
+                extra["auto_lev_cap"] = self._auto_leverage_cap.get(
+                    symbol, int(settings.MAX_LEVERAGE_CAP)
+                )
+
             trade_id = self._db.insert_trade_open(
                 symbol=symbol,
                 side="Buy" if direction == 1 else "Sell",
@@ -696,6 +755,7 @@ class TradingBot:
                 qty=qty,
                 leverage=risk_params.leverage,
                 mode=settings.TRADING_MODE,
+                extra=extra,
             )
             self._state_machine.enter(
                 symbol=symbol,
@@ -810,6 +870,11 @@ class TradingBot:
             entry = pos.entry_price
             pos_leverage = pos.leverage              # 레버리지 캡처 (exit 후 1로 초기화됨)
             remaining_entry_fee = pos.entry_fee  # partial_exit 후 남은 진입 수수료
+            # MFE/MAE 캡처 (exit() 호출 후 초기화됨)
+            _highest = pos.highest_price
+            _lowest = pos.lowest_price
+            _tp1_hit = pos.tp1_hit
+            _entry_ts = pos.entry_ts
 
             pnl = self._state_machine.exit(symbol, exit_price)
 
@@ -836,6 +901,34 @@ class TradingBot:
                     fee=total_fee,  # 진입 + 청산 수수료 합산
                     reason=reason,
                 )
+                # ── 청산 시점 컨텍스트 추가 기록 (손실 분석용) ─────────
+                bars_elapsed = int(
+                    (time.time() - _entry_ts) / 60
+                ) if _entry_ts > 0 else 0
+                # MFE/MAE: 거래 중 최대 유리/불리 이동
+                if entry > 0:
+                    if direction == 1:  # LONG
+                        mfe = (_highest - entry) / entry if _highest > 0 else 0
+                        mae = (entry - _lowest) / entry if _lowest > 0 else 0
+                    else:  # SHORT
+                        mfe = (entry - _lowest) / entry if _lowest > 0 else 0
+                        mae = (_highest - entry) / entry if _highest > 0 else 0
+                else:
+                    mfe, mae = 0, 0
+
+                exit_extra = {
+                    "exit_reason": reason,
+                    "bars_in_trade": bars_elapsed,
+                    "max_favorable_pct": round(max(mfe, 0), 6),
+                    "max_adverse_pct": round(max(mae, 0), 6),
+                    "pnl_net": round(pnl_net, 4),
+                    "pnl_pct": round(pnl_pct, 4) if margin_used > 0 else 0,
+                    "tp1_hit": _tp1_hit,
+                }
+                try:
+                    self._db.update_trade_extra(trade_id, exit_extra)
+                except Exception as e:
+                    log.debug("Failed to update trade extra: %s", e)
 
             log.info(
                 "Exit %s | reason=%s lev=%d× gross_pnl=%.4f fee=%.4f "
@@ -1164,6 +1257,14 @@ def main():
         bot._briefing.send,
         CronTrigger(hour="9,21", minute=0, timezone="Asia/Seoul"),
         id="periodic_briefing",
+    )
+
+    # Trade Analysis: 매일 09:00 KST + 21:00 KST (12시간마다)
+    # 최근 7일간 손실 거래 패턴을 분석하고 Slack으로 리포트
+    scheduler.add_job(
+        bot._trade_analyzer.run_analysis,
+        CronTrigger(hour="9,21", minute=30, timezone="Asia/Seoul"),
+        id="trade_analysis",
     )
 
     scheduler.start()
