@@ -114,6 +114,7 @@ class RegimeRouter:
         symbol: str,
         mtf_df: Optional[pd.DataFrame],
         macro_bear: bool = False,
+        is_altcoin: bool = False,
     ) -> RouterResult:
         """
         장세를 감지하고 라우팅 결정을 반환한다.
@@ -168,7 +169,7 @@ class RegimeRouter:
             symbol, raw_regime.value, confirmed.value, confidence, reason,
         )
 
-        return self._build_result(confirmed, confidence, reason)
+        return self._build_result(confirmed, confidence, reason, is_altcoin=is_altcoin)
 
     def get_confirmed_regime(self, symbol: str) -> DynamicRegime:
         """현재 확정된 레짐 조회 (Slack 알림 등 외부 참조용)."""
@@ -383,8 +384,25 @@ class RegimeRouter:
         regime: DynamicRegime,
         confidence: float,
         reason: str,
+        is_altcoin: bool = False,
     ) -> RouterResult:
         strategy, trade_mode, direction_bias, risk_mult, lev_cap = _ROUTING_TABLE[regime]
+
+        # 알트코인 SIDEWAYS: skip 대신 축소 진입 허용 (독립적 모멘텀 포착)
+        if (is_altcoin
+                and regime == DynamicRegime.SIDEWAYS
+                and self._s.ALTCOIN_SIDEWAYS_ENABLED):
+            return RouterResult(
+                regime=regime,
+                strategy="trend",
+                trade_mode="SCALP",
+                direction_bias=0,  # 양방향
+                risk_multiplier=self._s.ALTCOIN_SIDEWAYS_RISK_MULTIPLIER,
+                leverage_cap=3,
+                confidence=confidence,
+                reason=reason + "+altcoin_sideways_entry",
+            )
+
         return RouterResult(
             regime=regime,
             strategy=strategy,

@@ -427,28 +427,24 @@ class TestSymbolFiltering:
         finally:
             main_module.settings = orig
 
-    def test_bear_mode_allows_only_btc_eth(self):
-        """BEAR_SIDEWAYS 모드: BTC + ETH만 허용."""
+    def test_bear_mode_allows_all_universe(self):
+        """BEAR_SIDEWAYS 모드: 전체 유니버스 허용 (개별 레짐 라우터가 판단)."""
         bot, settings, main_module, orig = self._make_bot_mock(
-            "BEAR_SIDEWAYS", BEAR_MODE_SYMBOLS="BTCUSDT,ETHUSDT"
+            "BEAR_SIDEWAYS", BEAR_MODE_SYMBOLS=""
         )
         try:
             universe = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "XRPUSDT"]
             result = bot._filter_symbols_by_macro_regime(universe)
-            assert "BTCUSDT" in result
-            assert "ETHUSDT" in result
-            assert "SOLUSDT" not in result
-            assert "AVAXUSDT" not in result
+            assert set(result) == set(universe)
         finally:
             main_module.settings = orig
 
     def test_bear_mode_includes_symbols_with_open_positions(self):
-        """BEAR_SIDEWAYS 모드: 오픈 포지션 심볼은 항상 포함 (청산 관리)."""
+        """BEAR_SIDEWAYS 모드: 유니버스 외 오픈 포지션 심볼도 포함."""
         bot, settings, main_module, orig = self._make_bot_mock(
-            "BEAR_SIDEWAYS", BEAR_MODE_SYMBOLS="BTCUSDT,ETHUSDT"
+            "BEAR_SIDEWAYS", BEAR_MODE_SYMBOLS=""
         )
         try:
-            # SOLUSDT에 오픈 포지션 있음
             open_pos = MagicMock()
             open_pos.is_flat = False
 
@@ -456,30 +452,26 @@ class TestSymbolFiltering:
             flat_pos.is_flat = True
 
             def get_position_side_effect(symbol):
-                return open_pos if symbol == "SOLUSDT" else flat_pos
+                return open_pos if symbol == "LINKUSDT" else flat_pos
 
             bot._state_machine.get_position.side_effect = get_position_side_effect
 
-            universe = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT"]
-            result = bot._filter_symbols_by_macro_regime(universe)
-            assert "BTCUSDT" in result
-            assert "ETHUSDT" in result
-            assert "SOLUSDT" in result  # 포지션 있으므로 포함
-            assert "AVAXUSDT" not in result
-        finally:
-            main_module.settings = orig
-
-    def test_bull_mode_with_custom_symbols(self):
-        """BULL 모드: BULL_MODE_SYMBOLS 설정된 경우 해당 심볼만 허용."""
-        bot, settings, main_module, orig = self._make_bot_mock(
-            "BULL", BULL_MODE_SYMBOLS="BTCUSDT,ETHUSDT,SOLUSDT"
-        )
-        try:
-            universe = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "XRPUSDT"]
+            universe = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             result = bot._filter_symbols_by_macro_regime(universe)
             assert "BTCUSDT" in result
             assert "ETHUSDT" in result
             assert "SOLUSDT" in result
-            assert "AVAXUSDT" not in result
+        finally:
+            main_module.settings = orig
+
+    def test_bull_mode_allows_full_universe(self):
+        """BULL 모드: 전체 유니버스 허용."""
+        bot, settings, main_module, orig = self._make_bot_mock(
+            "BULL", BULL_MODE_SYMBOLS=""
+        )
+        try:
+            universe = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "XRPUSDT"]
+            result = bot._filter_symbols_by_macro_regime(universe)
+            assert set(result) == set(universe)
         finally:
             main_module.settings = orig

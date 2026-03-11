@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     PAUSE_DRAWDOWN_PCT: float = 0.42           # 42% → PAUSE (신규 진입 중단, 기존 포지션 관리)
     HALT_DRAWDOWN_PCT: float = 0.50            # 50% → HALT (긴급 전면 중단 — 계좌 보호 핵심)
     MAX_LEVERAGE_CAP: int = 5                  # 5× max leverage (보수적 — 손절 빈도 감소 우선)
-    MAX_CONCURRENT_POSITIONS: int = 2
+    MAX_CONCURRENT_POSITIONS: int = 5           # 50개 코인 → 동시 5개 포지션 허용
     MAX_TOTAL_EXPOSURE_PCT: float = 0.75       # 75% of equity exposed
     MAX_SINGLE_EXPOSURE_PCT: float = 0.30      # 30% per symbol
 
@@ -60,7 +60,12 @@ class Settings(BaseSettings):
     SIGNAL_TIMEFRAME: str = "15"               # 15분봉 — 5분봉 대비 노이즈 3× 감소
     TREND_TIMEFRAME: str = "1440"              # 일봉 — 200일 이동평균 기반 불/베어마켓 구분
     UNIVERSE_REFRESH_INTERVAL_HOURS: int = 4
-    TOP_N_COINS: int = 10                      # more symbols = more opportunities
+    TOP_N_COINS: int = 50                      # 거래량 상위 50개 모니터링
+    MIN_24H_TURNOVER_USDT: float = 5_000_000.0  # 최소 $5M 일거래대금 (유동성 필터)
+    MAJOR_COINS: str = "BTCUSDT,ETHUSDT"        # 메이저 코인 (리스크 구분)
+    ALTCOIN_RISK_MULTIPLIER: float = 0.5        # 알트코인 포지션 사이즈 50%
+    ALTCOIN_SIDEWAYS_ENABLED: bool = True       # 알트코인 횡보장에서도 축소 진입 허용
+    ALTCOIN_SIDEWAYS_RISK_MULTIPLIER: float = 0.3  # 알트 횡보장 리스크 30%
 
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
@@ -207,7 +212,7 @@ class Settings(BaseSettings):
 
     # ── Quality Gate (MTF 전략 기준 상향) ────────────────────────
     QUALITY_GATE_SHARPE: float = 0.0            # 양수 Sharpe (보수적 전략)
-    QUALITY_GATE_MDD: float = 0.25
+    QUALITY_GATE_MDD: float = 0.30              # MAX_DRAWDOWN_PCT(30%)와 동일
     QUALITY_GATE_WIN_RATE: float = 0.30        # 추세추종: 낮은 승률 + 높은 R:R (30%+)
     QUALITY_GATE_PROFIT_FACTOR: float = 1.0    # PF 1.0+ (순이익 확보)
     QUALITY_GATE_MIN_TRADES: int = 50          # MTF는 진입 횟수 줄어드므로 조정

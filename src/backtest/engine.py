@@ -475,6 +475,16 @@ class BacktestEngine:
 
         if not risk_params.risk_ok:
             return None
+
+        # 알트코인 리스크 축소 (실제 봇과 동일한 로직)
+        major_coins = [s.strip() for s in self._s.MAJOR_COINS.split(",") if s.strip()]
+        if symbol not in major_coins:
+            alt_mult = self._s.ALTCOIN_RISK_MULTIPLIER
+            risk_params.qty_base *= alt_mult
+            risk_params.position_size_usdt *= alt_mult
+            risk_params.margin_usdt *= alt_mult
+            risk_params.max_loss_usdt *= alt_mult
+
         if risk_params.position_size_usdt < 10.0:
             return None
 

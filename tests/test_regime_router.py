@@ -388,3 +388,70 @@ class TestEdgeCases:
         df_15m = make_ohlcv(400)
         df_60m = router._resample_to_60m(df_15m)
         assert 80 <= len(df_60m) <= 105
+
+
+# ── 알트코인 SIDEWAYS 진입 테스트 ──────────────────────────────────────────────
+
+class TestAltcoinSidewaysEntry:
+
+    def test_altcoin_sideways_allows_entry(self):
+        """알트코인 + SIDEWAYS → skip 대신 축소 진입 허용."""
+        router = RegimeRouter(make_settings(
+            ALTCOIN_SIDEWAYS_ENABLED=True,
+            ALTCOIN_SIDEWAYS_RISK_MULTIPLIER=0.3,
+            REGIME_ROUTER_CONFIRM_BARS=1,
+        ))
+        df = make_ohlcv(500)
+
+        with patch.object(router, "_classify",
+                          return_value=(DynamicRegime.SIDEWAYS, 0.5, "test")):
+            r = router.detect("SOLUSDT", df, is_altcoin=True)
+
+        assert r.strategy == "trend"
+        assert r.trade_mode == "SCALP"
+        assert r.direction_bias == 0
+        assert r.risk_multiplier == 0.3
+        assert r.leverage_cap == 3
+        assert "altcoin_sideways_entry" in r.reason
+
+    def test_major_coin_sideways_still_skips(self):
+        """메이저 코인 (is_altcoin=False) SIDEWAYS → 기존대로 skip."""
+        router = RegimeRouter(make_settings(
+            ALTCOIN_SIDEWAYS_ENABLED=True,
+            REGIME_ROUTER_CONFIRM_BARS=1,
+        ))
+        df = make_ohlcv(500)
+
+        with patch.object(router, "_classify",
+                          return_value=(DynamicRegime.SIDEWAYS, 0.5, "test")):
+            r = router.detect("BTCUSDT", df, is_altcoin=False)
+
+        assert r.strategy == "skip"
+
+    def test_altcoin_sideways_disabled(self):
+        """ALTCOIN_SIDEWAYS_ENABLED=False → 알트코인도 SIDEWAYS skip."""
+        router = RegimeRouter(make_settings(
+            ALTCOIN_SIDEWAYS_ENABLED=False,
+            REGIME_ROUTER_CONFIRM_BARS=1,
+        ))
+        df = make_ohlcv(500)
+
+        with patch.object(router, "_classify",
+                          return_value=(DynamicRegime.SIDEWAYS, 0.5, "test")):
+            r = router.detect("SOLUSDT", df, is_altcoin=True)
+
+        assert r.strategy == "skip"
+
+    def test_altcoin_bull_not_affected(self):
+        """알트코인이 BULL 레짐이면 정상 라우팅 (SIDEWAYS 특례 미적용)."""
+        router = RegimeRouter(make_settings(REGIME_ROUTER_CONFIRM_BARS=1))
+        df = make_ohlcv(500)
+
+        with patch.object(router, "_classify",
+                          return_value=(DynamicRegime.BULL, 0.8, "test")):
+            r = router.detect("SOLUSDT", df, is_altcoin=True)
+
+        assert r.strategy == "trend"
+        assert r.trade_mode == "SCALP"
+        assert r.direction_bias == +1
+        assert r.risk_multiplier == 0.80

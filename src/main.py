@@ -390,6 +390,11 @@ class TradingBot:
             rm = self._auto_risk_multiplier.get(symbol, 1.0)
             lc = self._auto_leverage_cap.get(symbol, int(settings.MAX_LEVERAGE_CAP))
 
+            # 알트코인 포지션 사이즈 축소 (메이저 대비 리스크 제한)
+            major_coins = [s.strip() for s in settings.MAJOR_COINS.split(",") if s.strip()]
+            if symbol not in major_coins:
+                rm *= settings.ALTCOIN_RISK_MULTIPLIER
+
             if rm < 1.0:
                 risk_params.qty_base           *= rm
                 risk_params.position_size_usdt *= rm
@@ -593,11 +598,15 @@ class TradingBot:
             return None
 
         # ── 레짐 감지 ────────────────────────────────────────────────────────
-        is_macro_bear = (self._macro_mode == "BEAR_SIDEWAYS")
+        major_coins = [s.strip() for s in settings.MAJOR_COINS.split(",") if s.strip()]
+        is_altcoin = symbol not in major_coins
+        # 알트코인은 BTC 매크로 베어와 독립적으로 추세 가능 → macro_bear 미적용
+        is_macro_bear = (self._macro_mode == "BEAR_SIDEWAYS") and not is_altcoin
         router_result = self._regime_router.detect(
             symbol=symbol,
             mtf_df=snap.trend_ohlcv,
             macro_bear=is_macro_bear,
+            is_altcoin=is_altcoin,
         )
 
         log.info(
@@ -957,30 +966,16 @@ class TradingBot:
 
     def _filter_symbols_by_macro_regime(self, symbols: List[str]) -> List[str]:
         """
-        매크로 레짐에 따라 거래 심볼을 필터링한다.
-        - BULL 모드: 전체 유니버스 심볼 허용 (멀티코인 스캘핑)
-        - BEAR/SIDEWAYS 모드: BTC + ETH만 허용 (고배율 스캘핑)
+        모든 매크로 레짐에서 전체 유니버스를 거래한다.
+        개별 코인의 레짐 라우터가 진입/스킵을 결정하므로, 매크로 레벨에서 심볼 제한을 두지 않는다.
+        기존 포지션 보유 심볼은 항상 포함 (청산 관리 위해).
         """
-        if self._macro_mode == "BULL":
-            # BULL 모드 심볼 설정이 있으면 그것만, 없으면 전체 유니버스
-            if settings.BULL_MODE_SYMBOLS:
-                allowed = [s.strip() for s in settings.BULL_MODE_SYMBOLS.split(",") if s.strip()]
-                filtered = [s for s in symbols if s in allowed]
-                return filtered if filtered else symbols
-            return symbols
-        else:
-            # BEAR/SIDEWAYS 모드: BTC + ETH만
-            allowed = [s.strip() for s in settings.BEAR_MODE_SYMBOLS.split(",") if s.strip()]
-            # 현재 포지션 보유 심볼은 항상 포함 (청산 관리 위해)
-            has_position = [s for s in symbols if not self._state_machine.get_position(s).is_flat]
-            target = set(allowed) | set(has_position)
-            # 유니버스에 포함된 심볼 우선, BTC/ETH는 유니버스 여부 무관하게 항상 포함
-            result = [s for s in symbols if s in target]
-            # allowed에 있지만 universe에 없는 심볼 추가 (BTC/ETH 보장)
-            for s in allowed:
-                if s not in result:
-                    result.append(s)
-            return result if result else allowed
+        has_position = [s for s in symbols if not self._state_machine.get_position(s).is_flat]
+        result = list(symbols)
+        for s in has_position:
+            if s not in result:
+                result.append(s)
+        return result
 
     def update_macro_regime(self) -> None:
         """

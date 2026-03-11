@@ -57,7 +57,8 @@ class UniverseManager:
             # Only linear perpetuals (no expiry)
             turnover = float(t.get("turnover24h", 0) or 0)
             volume = float(t.get("volume24h", 0) or 0)
-            if turnover < 1_000_000:   # skip tiny markets (< 1M USDT daily)
+            min_turnover = self._settings.MIN_24H_TURNOVER_USDT
+            if turnover < min_turnover:
                 continue
             candidates.append((symbol, turnover))
 
