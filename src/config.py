@@ -69,14 +69,14 @@ class Settings(BaseSettings):
 
     # ── Scalping Parameters (15분봉 기준) ──────────────────────────
     VWAP_SESSION_BARS: int = 96                # bars per session for VWAP
-    SCALP_STOP_ATR: float = 1.5               # SL: 1.5× ATR (15분봉 노이즈 대응)
+    SCALP_STOP_ATR: float = 2.5               # SL: 2.5× ATR (노이즈 흡수 — 1.5→2.5 최적화)
     SCALP_TP1_ATR: float = 2.0                # TP1 R:R 1.33:1 — 빠른 트레일링 활성화
     SCALP_TP2_ATR: float = 8.0                # TP2 R:R 5.3:1 — 추세 극대화
     SCALP_MAX_BARS: int = 48                   # 15분봉 × 48 = 12시간 최대
     SCALP_PARTIAL_EXIT_PCT: float = 0.0        # TP1은 트레일링 활성화만, 부분 청산 없음
 
     # ── Trend Ride Parameters (15분봉 기준) ──────────────────────────
-    TREND_STOP_ATR: float = 2.5               # SL: 2.5× ATR (추세 스탑)
+    TREND_STOP_ATR: float = 3.5               # SL: 3.5× ATR (추세 노이즈 흡수 — 2.5→3.5 최적화)
     TREND_TP1_ATR: float = 3.5                # TP1 R:R 1.4:1 — 빠른 수익 확보
     TREND_TP2_ATR: float = 10.0               # TP2 R:R 4.0:1 — 추세 극대화
     TREND_MAX_BARS: int = 240                  # 15분봉 × 240 = 60시간 최대
@@ -113,8 +113,8 @@ class Settings(BaseSettings):
     # ATR × 배수가 너무 작을 때 스탑이 즉시 터지는 것 방지 (가격 대비 최소 %)
     # 3분봉 ATR은 15분봉 대비 ~3× 작으므로 TREND_RIDE 모드에서 특히 중요
     MIN_STOP_PCT_PURE_SCALP: float = 0.005   # 최소 0.5% — 3분봉 노이즈 흡수
-    MIN_STOP_PCT_SCALP: float = 0.008        # 최소 0.8% — 15분봉 노이즈 흡수
-    MIN_STOP_PCT_TREND_RIDE: float = 0.015   # 최소 1.5% — 추세 큰 노이즈 흡수
+    MIN_STOP_PCT_SCALP: float = 0.015        # 최소 1.5% — 노이즈 흡수 (0.8→1.5% 최적화)
+    MIN_STOP_PCT_TREND_RIDE: float = 0.020   # 최소 2.0% — 추세 큰 노이즈 흡수 (1.5→2.0% 최적화)
 
     # ── Trend EMA Strategy Parameters (STRATEGY_MODE="trend") ──────────
     # Phase-locked direction: BULL_TREND=LONG만, BEAR_TREND=SHORT만, SIDEWAYS=양방향
