@@ -9,10 +9,7 @@ name: Paper Trading (GitHub Actions)
 # ──────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    # Every 15 minutes (matches SIGNAL_TIMEFRAME=15)
-    # NOTE: GitHub Actions minimum is 5 minutes; cron syntax supports this
-    - cron: '*/15 * * * *'
+  # 예약 실행은 끄고 수동 실행만 남긴다. 다시 켜려면 schedule 블록을 추가한다.
   workflow_dispatch:  # manual trigger
 
 concurrency:

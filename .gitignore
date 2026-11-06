@@ -85,3 +85,6 @@ Thumbs.db
 
 # ── Pre-commit ────────────────────────────────────────────────
 .pre-commit-config.yaml.bak
+
+# ── Claude Code local settings ────────────────────────────────
+.claude/settings.local.json

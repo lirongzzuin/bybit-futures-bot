@@ -1,10 +1,9 @@
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
 
 name: Fly Deploy
+# 저장소 공개 후 push 마다 실거래 봇이 재배포되지 않도록 수동 실행으로만 둔다.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 jobs:
   deploy:
     name: Deploy app
